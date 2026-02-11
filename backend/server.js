@@ -22,8 +22,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- Veritabanı Bağlantısı (GÜNCELLENDİ) ---
-// Artık bağlanınca konsola bilgi verecek
+// --- Veritabanı Bağlantısı ---
 const db = new sqlite3.Database('./project.db', (err) => {
     if (err) {
         console.error("Veritabanı hatası:", err.message);
@@ -33,12 +32,12 @@ const db = new sqlite3.Database('./project.db', (err) => {
 });
 
 db.serialize(() => {
-    // 1. Users (Public Key eklendi)
+    // 1. Users
     db.run(`CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
         password TEXT,
-        public_key TEXT -- YENİ: Başkaları dosya gönderebilsin diye
+        public_key TEXT
     )`);
 
     // 2. Files
@@ -51,13 +50,13 @@ db.serialize(() => {
         FOREIGN KEY(user_id) REFERENCES users(id)
     )`);
 
-    // 3. File Shares (YENİ: Paylaşım Tablosu)
+    // 3. File Shares (Mimarinin Kalbi: Anahtarları burada tutuyoruz)
     db.run(`CREATE TABLE IF NOT EXISTS file_shares (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         file_id INTEGER,
         from_user_id INTEGER,
         to_user_id INTEGER,
-        encrypted_key TEXT, -- Alıcı için şifrelenmiş AES anahtarı
+        encrypted_key TEXT, -- Dosyayı açacak anahtar
         FOREIGN KEY(file_id) REFERENCES files(id)
     )`);
 
@@ -76,7 +75,7 @@ const logActivity = (userId, action, details) => {
 
 // --- API'ler ---
 
-// 1. Kayıt Ol (Public Key ile)
+// 1. Kayıt Ol
 app.post('/api/register', async (req, res) => {
     const { username, password, publicKey } = req.body;
     try {
@@ -105,7 +104,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// 3. Kullanıcı Listesini Getir (Kendisi hariç)
+// 3. Kullanıcı Listesi
 app.get('/api/users-list/:myId', (req, res) => {
     const myId = req.params.myId;
     db.all(`SELECT id, username, public_key FROM users WHERE id != ?`, [myId], (err, rows) => {
@@ -117,7 +116,7 @@ app.get('/api/users-list/:myId', (req, res) => {
 app.post('/api/share', (req, res) => {
     const { fileId, fromUserId, toUserId, encryptedKey } = req.body;
     
-    // Zaten paylaşılmış mı kontrol et
+    // Zaten paylaşılmış mı?
     db.get(`SELECT * FROM file_shares WHERE file_id = ? AND to_user_id = ?`, [fileId, toUserId], (err, row) => {
         if (row) return res.status(400).json({ error: "Bu dosya zaten bu kişiyle paylaşılmış." });
 
@@ -131,7 +130,7 @@ app.post('/api/share', (req, res) => {
     });
 });
 
-// 5. Bana Paylaşılan Dosyaları Getir
+// 5. Bana Paylaşılan Dosyalar
 app.get('/api/shared-files/:userId', (req, res) => {
     const userId = req.params.userId;
     const sql = `
@@ -147,27 +146,61 @@ app.get('/api/shared-files/:userId', (req, res) => {
     });
 });
 
-// 6. Dosya Yükle
+// --- 👇 KRİTİK DEĞİŞİKLİKLER BURADA 👇 ---
+
+// 6. Dosya Yükle (GÜNCELLENDİ: Anahtar Ayrıştırıldı ve Saklandı)
 app.post('/api/upload', upload.single('encryptedFile'), (req, res) => {
     const userId = req.body.userId; 
+    const encryptedKey = req.body.encryptedKey; // Frontend'den ayrı geliyor
     const file = req.file;
+
     if (!file) return res.status(400).json({ error: "Dosya yok." });
+    if (!encryptedKey) return res.status(400).json({ error: "Şifreleme anahtarı eksik! (Mimari gereklilik)" });
 
-    db.run(`INSERT INTO files (user_id, filename, path) VALUES (?, ?, ?)`,
-        [userId, file.originalname, file.path], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            const fileId = this.lastID;
-            logActivity(userId, "FILE_UPLOAD", `Dosya yüklendi (Ref_ID: #${fileId})`);
-            res.json({ message: "Yüklendi.", fileId: fileId });
-        });
+    db.serialize(() => {
+        // A. Dosyayı fiziksel olarak kaydet (Saf şifreli veri)
+        db.run(`INSERT INTO files (user_id, filename, path) VALUES (?, ?, ?)`,
+            [userId, file.originalname, file.path], function(err) {
+                if (err) return res.status(500).json({ error: err.message });
+                
+                const fileId = this.lastID;
+
+                // B. Anahtarı Kaydet (SELF-SHARE)
+                // Dosya sahibinin kendi dosyasını açabilmesi için anahtarı kendine paylaşıyoruz.
+                db.run(`INSERT INTO file_shares (file_id, from_user_id, to_user_id, encrypted_key) VALUES (?, ?, ?, ?)`,
+                    [fileId, userId, userId, encryptedKey], 
+                    (shareErr) => {
+                        if (shareErr) return res.status(500).json({ error: shareErr.message });
+
+                        logActivity(userId, "FILE_UPLOAD", `Dosya Yüklendi ve Anahtarı Saklandı (ID: #${fileId})`);
+                        res.json({ message: "Dosya ve Anahtar başarıyla ayrıştırılarak kaydedildi.", fileId: fileId });
+                    }
+                );
+            });
+    });
 });
 
-// 7. Dosyalarım
+// 7. Dosyalarım (GÜNCELLENDİ: Anahtarı DB'den Çeker)
 app.get('/api/files/:userId', (req, res) => {
-    db.all(`SELECT id, filename, upload_date FROM files WHERE user_id = ?`, [req.params.userId], (err, rows) => res.json(rows));
+    const userId = req.params.userId;
+    
+    // JOIN İşlemi: Kullanıcının hem kendi yüklediği dosyaları hem de o dosyaların anahtarlarını getirir.
+    const sql = `
+        SELECT files.id, files.filename, files.upload_date, file_shares.encrypted_key
+        FROM files
+        JOIN file_shares ON files.id = file_shares.file_id
+        WHERE files.user_id = ? AND file_shares.to_user_id = ?
+    `;
+    
+    db.all(sql, [userId, userId], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
 });
 
-// 8. İndir (Güvenlik kontrolü gevşetildi: Sahibi VEYA Paylaşılan Kişi indirebilir)
+// --- ☝️ KRİTİK DEĞİŞİKLİKLER BİTTİ ☝️ ---
+
+// 8. İndir
 app.get('/api/download/:fileId', (req, res) => {
     const fileId = req.params.fileId;
     db.get(`SELECT * FROM files WHERE id = ?`, [fileId], (err, row) => {

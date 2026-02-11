@@ -6,14 +6,13 @@ import { decryptFile } from '../utils/aes';
 
 export default function Dashboard({ user, onLogout }) {
     const [files, setFiles] = useState([]);
-    const [sharedFiles, setSharedFiles] = useState([]); // Bana paylaşılanlar
+    const [sharedFiles, setSharedFiles] = useState([]); 
     const [logs, setLogs] = useState([]);
-    const [users, setUsers] = useState([]); // Paylaşabileceğim kişiler
+    const [users, setUsers] = useState([]); 
     const [selectedUser, setSelectedUser] = useState('');
-    const [shareFileId, setShareFileId] = useState(null); // Hangi dosyayı paylaşıyoruz?
+    const [shareFileId, setShareFileId] = useState(null); 
 
-    // --- VERİ YÜKLEME FONKSİYONU (GÜNCELLENDİ: useCallback) ---
-    // useCallback sayesinde bu fonksiyon hafızada sabitlenir ve gereksiz render'ı önler.
+    // --- VERİ YÜKLEME ---
     const loadData = useCallback(async () => {
         try {
             const fileList = await api.getFiles(user.id);
@@ -30,57 +29,54 @@ export default function Dashboard({ user, onLogout }) {
         } catch (error) {
             console.error("Veri yükleme hatası:", error);
         }
-    }, [user.id]); // Sadece user.id değişirse fonksiyon yenilenir.
+    }, [user.id]);
 
     useEffect(() => {
-        // eslint-disable-next-line
-        loadData(); // İlk açılışta verileri çek
-        
-        // Logları canlı tutmak için interval
+        loadData(); 
         const interval = setInterval(() => api.getLogs().then(setLogs), 2000);
-        
-        // Temizlik (Cleanup)
         return () => clearInterval(interval);
-    }, [loadData]); // loadData artık güvenli bir bağımlılık
+    }, [loadData]);
 
-    // --- DOSYA PAYLAŞMA MANTIĞI (CRYPTO CORE) ---
+    // --- DOSYA PAYLAŞMA MANTIĞI (GÜNCELLENDİ) ---
+    // Artık dosyayı indirmemize gerek yok! 
+    // Elimizde zaten veritabanından gelen 'encrypted_key' var.
     const handleShare = async () => {
         if (!selectedUser || !shareFileId) return;
         
         try {
-            alert("Paylaşım işlemi başlıyor. Tarayıcınızda şifreleme yapılacak...");
+            alert("Paylaşım işlemi başlıyor. Anahtar şifreleniyor...");
 
-            // 1. Önce dosyayı indirip KENDİ anahtarımızla AES anahtarını çözmemiz lazım
-            const blob = await api.downloadFile(shareFileId);
-            const buffer = await blob.arrayBuffer();
+            // 1. Paylaşılacak dosyanın bilgilerini bul (State içinden)
+            const fileToShare = files.find(f => f.id === shareFileId);
+            if (!fileToShare || !fileToShare.encrypted_key) {
+                throw new Error("Dosya anahtarı bulunamadı!");
+            }
 
-            // Kendi Private Key'imiz
+            // 2. Kendi Private Key'imizle, dosyanın AES anahtarını çöz (UNWRAP)
             const privKeyStr = localStorage.getItem(`priv_${user.username}`);
             const privateKey = await importKey(privKeyStr, "private");
 
-            // Dosya başlığından şifreli AES anahtarını al
-            const view = new DataView(buffer);
-            const keyLength = view.getUint32(0, true);
-            const wrappedKey = buffer.slice(4, 4 + keyLength);
+            // Veritabanından gelen JSON anahtarı Buffer'a çevir
+            const myKeyArray = JSON.parse(fileToShare.encrypted_key);
+            const myKeyBuffer = new Uint8Array(myKeyArray).buffer;
+            
+            // Saf AES anahtarını elde et
+            const aesKey = await unwrapAESKey(myKeyBuffer, privateKey);
 
-            // AES anahtarını açığa çıkar (Unwrap)
-            const aesKey = await unwrapAESKey(wrappedKey, privateKey);
-
-            // 2. Şimdi bu AES anahtarını, ALICI KİŞİNİN Public Key'i ile şifrele (Wrap)
+            // 3. Alıcının Public Key'i ile tekrar şifrele (WRAP)
             const targetUser = users.find(u => u.id == selectedUser);
             const targetPubKey = await importKey(targetUser.public_key, "public");
             
             const reWrappedKey = await wrapAESKey(aesKey, targetPubKey);
 
-            // 3. Yeni şifreli anahtarı sunucuya gönder
-            // ArrayBuffer -> String dönüşümü için JSON stringify:
+            // 4. Yeni şifreli anahtarı sunucuya gönder
             const reWrappedKeyArray = Array.from(new Uint8Array(reWrappedKey));
             
             await api.shareFile(shareFileId, user.id, selectedUser, JSON.stringify(reWrappedKeyArray));
 
             alert(`Dosya ${targetUser.username} ile başarıyla paylaşıldı!`);
             setShareFileId(null);
-            loadData(); // Listeleri güncelle
+            loadData(); 
 
         } catch (err) {
             console.error(err);
@@ -88,52 +84,45 @@ export default function Dashboard({ user, onLogout }) {
         }
     };
 
-    // --- İNDİRME MANTIĞI ---
-    const handleDownload = async (fileId, fileName, isShared = false, sharedKeyJson = null) => {
+    // --- İNDİRME MANTIĞI (GÜNCELLENDİ) ---
+    // Artık header okuma, slice yapma yok. Anahtar parametre olarak geliyor.
+    const handleDownload = async (fileId, fileName, encryptedKeyJSON) => {
         try {
-            const blob = await api.downloadFile(fileId);
-            const buffer = await blob.arrayBuffer();
+            if (!encryptedKeyJSON) {
+                alert("Hata: Anahtar bulunamadı. Lütfen sayfayı yenileyin.");
+                return;
+            }
 
+            console.log(`İndiriliyor: ${fileName}`);
+
+            // 1. Dosyayı İndir (Sadece şifreli içerik)
+            const blob = await api.downloadFile(fileId);
+            const encryptedFileBuffer = await blob.arrayBuffer();
+
+            // 2. Private Key'i Al
             const privKeyStr = localStorage.getItem(`priv_${user.username}`);
             const privateKey = await importKey(privKeyStr, "private");
 
-            let aesKey;
+            // 3. Anahtarı Çöz (Unwrap)
+            const keyArray = JSON.parse(encryptedKeyJSON);
+            const keyBuffer = new Uint8Array(keyArray).buffer;
+            const aesKey = await unwrapAESKey(keyBuffer, privateKey);
 
-            if (isShared) {
-                // EĞER PAYLAŞILAN DOSYA İSE:
-                const sharedKeyArray = JSON.parse(sharedKeyJson);
-                const sharedKeyBuffer = new Uint8Array(sharedKeyArray).buffer;
-                
-                // Bana özel şifrelenmiş anahtarı çöz
-                aesKey = await unwrapAESKey(sharedKeyBuffer, privateKey);
+            // 4. Dosyayı Çöz (Decrypt)
+            // Dosya artık saf veri olduğu için header atlama işlemi YOK.
+            const decryptedBuffer = await decryptFile(new Uint8Array(encryptedFileBuffer), aesKey);
 
-            } else {
-                // KENDİ DOSYAM İSE:
-                const view = new DataView(buffer);
-                const keyLength = view.getUint32(0, true);
-                const wrappedKey = buffer.slice(4, 4 + keyLength);
-                aesKey = await unwrapAESKey(wrappedKey, privateKey);
-            }
-
-            // Dosyanın içeriğini (Header'ı atlayarak) çöz
-            // Header uzunluğunu hesapla
-            const view = new DataView(buffer);
-            const originalKeyLength = view.getUint32(0, true);
-            const offset = 4 + originalKeyLength;
-            
-            const encryptedContent = buffer.slice(offset);
-
-            // Çözme işlemi
-            const decryptedBuffer = await decryptFile(new Uint8Array(encryptedContent), aesKey);
-
+            // 5. İndir
             const url = window.URL.createObjectURL(new Blob([decryptedBuffer]));
             const a = document.createElement('a');
             a.href = url;
             a.download = fileName.replace('.enc', '');
             a.click();
             window.URL.revokeObjectURL(url);
+
         } catch (err) {
-            alert("Hata: " + err.message);
+            console.error(err);
+            alert("İndirme Hatası: " + err.message);
         }
     };
 
@@ -181,7 +170,8 @@ export default function Dashboard({ user, onLogout }) {
                                     </div>
                                     <div className="actions">
                                         <button className="icon-btn" onClick={() => setShareFileId(f.id)} title="Paylaş">🔗</button>
-                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, false)}>⬇️</button>
+                                        {/* BURASI GÜNCELLENDİ: Anahtarı parametre olarak veriyoruz */}
+                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, f.encrypted_key)}>⬇️</button>
                                     </div>
                                 </li>
                             ))}
@@ -200,7 +190,8 @@ export default function Dashboard({ user, onLogout }) {
                                             <span className="fdate">Gönderen: {f.sender_name}</span>
                                             <span className="badge" style={{background:'#fffbeb', color:'#b45309'}}>🔑 Paylaşımlı</span>
                                         </div>
-                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, true, f.encrypted_key)}>
+                                        {/* BURASI GÜNCELLENDİ: Anahtarı parametre olarak veriyoruz */}
+                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, f.encrypted_key)}>
                                             ⬇️ İndir
                                         </button>
                                     </li>

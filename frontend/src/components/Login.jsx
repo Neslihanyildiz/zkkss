@@ -24,7 +24,6 @@ export default function Login({ onLogin }) {
                 const privKeyStr = await exportKey(keyPair.privateKey);
 
                 // 2. Kayıt Ol (Public Key'i de gönderiyoruz!)
-                // DİKKAT: api.register artık 3 parametre alıyor
                 const res = await api.register(username, password, pubKeyStr);
                 
                 if (res.error) throw new Error(res.error);
