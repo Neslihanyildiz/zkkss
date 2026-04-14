@@ -2,17 +2,16 @@ const jwt = require('jsonwebtoken');
 
 module.exports = (req, res, next) => {
     try {
-        // 1. Token'ı başlık (header) kısmından al: "Bearer <token>"
-        const token = req.headers.authorization.split(' ')[1];
-        
-        // 2. Token'ı doğrula
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Yetkilendirme başarısız. Token eksik.' });
+        }
+
+        const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
-        // 3. Çözülen kullanıcı bilgisini isteğe ekle (req.user artık kullanılabilir)
-        req.user = decoded;
-        
-        next(); // Her şey yolunda, sıradaki işleme geç
+        req.user = decoded; // { id, username, iat, exp }
+        next();
     } catch (error) {
-        return res.status(401).json({ error: 'Yetkilendirme başarısız. Lütfen giriş yapın.' });
+        return res.status(401).json({ error: 'Yetkilendirme başarısız. Token geçersiz.' });
     }
 };

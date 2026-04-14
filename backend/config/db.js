@@ -1,13 +1,13 @@
 const { Sequelize } = require('sequelize');
 const path = require('path');
 
-// Veritabanı dosyasının yolu (data klasörü içinde oluşacak)
-const dbPath = path.join(__dirname, '../data/database.sqlite');
+// Point to the same project.db that server.js created so data is shared
+const dbPath = path.join(__dirname, '../project.db');
 
 const sequelize = new Sequelize({
     dialect: 'sqlite',
     storage: dbPath,
-    logging: false // Terminali SQL yazılarıyla doldurmamak için false yaptık
+    logging: false
 });
 
 module.exports = sequelize;

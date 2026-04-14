@@ -2,31 +2,35 @@ const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db');
 const User = require('./User');
 
+// Maps to the 'activity_logs' table created by server.js
 const AuditLog = sequelize.define('AuditLog', {
     id: {
         type: DataTypes.INTEGER,
         primaryKey: true,
         autoIncrement: true
     },
+    user_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
+    },
     action: {
-        type: DataTypes.STRING, 
+        type: DataTypes.STRING,
         allowNull: false
-        // Örnek: 'LOGIN', 'REGISTER', 'FILE_UPLOAD', 'FILE_DELETE'
     },
     details: {
         type: DataTypes.TEXT,
         allowNull: true
-        // Örnek: "Ahmet 'tez.pdf' dosyasını yükledi."
     },
-    ip_address: {
-        type: DataTypes.STRING,
-        allowNull: true
+    // Column is 'timestamp' in project.db, not Sequelize's createdAt
+    timestamp: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
     }
 }, {
-    timestamps: true // created_at bize işlemin ZAMANINI verecek
+    tableName: 'activity_logs',
+    timestamps: false
 });
 
-// İlişki: Bir logu bir kullanıcı oluşturur
 AuditLog.belongsTo(User, { foreignKey: 'user_id' });
 User.hasMany(AuditLog, { foreignKey: 'user_id' });
 

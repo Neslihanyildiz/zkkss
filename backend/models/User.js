@@ -1,6 +1,7 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db');
 
+// Maps to the 'users' table created by server.js (column: password, no timestamps)
 const User = sequelize.define('User', {
     id: {
         type: DataTypes.INTEGER,
@@ -12,17 +13,18 @@ const User = sequelize.define('User', {
         allowNull: false,
         unique: true
     },
-    password_hash: {
+    // Column is named 'password' in project.db (bcrypt hash stored here)
+    password: {
         type: DataTypes.STRING,
         allowNull: false
     },
-    // Kullanıcının Açık Anahtarı (Dosya paylaşımı için gerekli)
     public_key: {
         type: DataTypes.TEXT,
-        allowNull: true 
+        allowNull: true
     }
 }, {
-    timestamps: true // created_at ve updated_at otomatik eklenir
+    tableName: 'users',
+    timestamps: false
 });
 
 module.exports = User;
