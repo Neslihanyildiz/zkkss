@@ -10,7 +10,7 @@ export async function generateAESKey() {
   );
 }
 
-// 2. Dosyayı Şifrele (BU EKSİKTİ)
+// 2. Dosyayı Şifrele 
 export async function encryptFile(fileBytes, aesKey) {
   // IV (Initialization Vector) - Güvenlik için rastgele olmalı
   const iv = window.crypto.getRandomValues(new Uint8Array(12)); 

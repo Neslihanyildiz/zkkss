@@ -24,7 +24,6 @@ export default function Login({ onLogin }) {
                 const privKeyStr = await exportKey(keyPair.privateKey);
 
                 // 2. Kayıt Ol (Public Key'i de gönderiyoruz!)
-                // DİKKAT: api.register artık 3 parametre alıyor
                 const res = await api.register(username, password, pubKeyStr);
                 
                 if (res.error) throw new Error(res.error);
@@ -40,14 +39,17 @@ export default function Login({ onLogin }) {
                 }, 1500);
             } else {
                 // Giriş İşlemleri
-                const res = await api.login(username, password);
-                if (res.user) {
-                    const privKey = localStorage.getItem(`priv_${username}`);
-                    if (!privKey) {
-                        alert("Uyarı: Bu tarayıcıda Private Key bulunamadı.");
-                    }
-                    onLogin(res.user);
-                }
+                // YENİ:
+const res = await api.login(username, password);
+if (res.error) throw new Error(res.error);
+if (res.token) {
+    localStorage.setItem('token', res.token); // ← token kaydediliyor
+    const privKey = localStorage.getItem(`priv_${username}`);
+    if (!privKey) {
+        alert("Uyarı: Bu tarayıcıda Private Key bulunamadı.");
+    }
+    onLogin(res.user);
+}
             }
         } catch (err) {
             setStatus('❌ Hata: ' + err.message);

@@ -6,81 +6,66 @@ import { decryptFile } from '../utils/aes';
 
 export default function Dashboard({ user, onLogout }) {
     const [files, setFiles] = useState([]);
-    const [sharedFiles, setSharedFiles] = useState([]); // Bana paylaşılanlar
+    const [sharedFiles, setSharedFiles] = useState([]);
     const [logs, setLogs] = useState([]);
-    const [users, setUsers] = useState([]); // Paylaşabileceğim kişiler
+    const [users, setUsers] = useState([]);
     const [selectedUser, setSelectedUser] = useState('');
-    const [shareFileId, setShareFileId] = useState(null); // Hangi dosyayı paylaşıyoruz?
+    const [shareFileId, setShareFileId] = useState(null);
 
-    // --- VERİ YÜKLEME FONKSİYONU (GÜNCELLENDİ: useCallback) ---
-    // useCallback sayesinde bu fonksiyon hafızada sabitlenir ve gereksiz render'ı önler.
     const loadData = useCallback(async () => {
         try {
-            const fileList = await api.getFiles(user.id);
-            setFiles(fileList);
-            
-            const sharedList = await api.getSharedFiles(user.id);
-            setSharedFiles(sharedList);
+            const fileList = await api.getMyFiles();
+            setFiles(Array.isArray(fileList) ? fileList : []);
+
+            const sharedList = await api.getSharedFiles();
+            setSharedFiles(Array.isArray(sharedList) ? sharedList : []);
 
             const logList = await api.getLogs();
-            setLogs(logList);
+            setLogs(Array.isArray(logList) ? logList : []);
 
-            const userList = await api.getUsersList(user.id);
-            setUsers(userList);
+            const userList = await api.getUsers();
+            setUsers(Array.isArray(userList) ? userList : []);
         } catch (error) {
             console.error("Veri yükleme hatası:", error);
         }
-    }, [user.id]); // Sadece user.id değişirse fonksiyon yenilenir.
+    }, []);
 
     useEffect(() => {
-        // eslint-disable-next-line
-        loadData(); // İlk açılışta verileri çek
-        
-        // Logları canlı tutmak için interval
-        const interval = setInterval(() => api.getLogs().then(setLogs), 2000);
-        
-        // Temizlik (Cleanup)
+        loadData();
+        const interval = setInterval(() => {
+            api.getLogs().then(data => setLogs(Array.isArray(data) ? data : []));
+        }, 5000);
         return () => clearInterval(interval);
-    }, [loadData]); // loadData artık güvenli bir bağımlılık
+    }, [loadData]);
 
-    // --- DOSYA PAYLAŞMA MANTIĞI (CRYPTO CORE) ---
     const handleShare = async () => {
         if (!selectedUser || !shareFileId) return;
-        
+
         try {
-            alert("Paylaşım işlemi başlıyor. Tarayıcınızda şifreleme yapılacak...");
+            alert("Paylaşım işlemi başlıyor. Anahtar şifreleniyor...");
 
-            // 1. Önce dosyayı indirip KENDİ anahtarımızla AES anahtarını çözmemiz lazım
-            const blob = await api.downloadFile(shareFileId);
-            const buffer = await blob.arrayBuffer();
+            const fileToShare = files.find(f => f.id === shareFileId);
+            if (!fileToShare || !fileToShare.encrypted_key) {
+                throw new Error("Dosya anahtarı bulunamadı!");
+            }
 
-            // Kendi Private Key'imiz
             const privKeyStr = localStorage.getItem(`priv_${user.username}`);
             const privateKey = await importKey(privKeyStr, "private");
 
-            // Dosya başlığından şifreli AES anahtarını al
-            const view = new DataView(buffer);
-            const keyLength = view.getUint32(0, true);
-            const wrappedKey = buffer.slice(4, 4 + keyLength);
+            const myKeyArray = JSON.parse(fileToShare.encrypted_key);
+            const myKeyBuffer = new Uint8Array(myKeyArray).buffer;
+            const aesKey = await unwrapAESKey(myKeyBuffer, privateKey);
 
-            // AES anahtarını açığa çıkar (Unwrap)
-            const aesKey = await unwrapAESKey(wrappedKey, privateKey);
-
-            // 2. Şimdi bu AES anahtarını, ALICI KİŞİNİN Public Key'i ile şifrele (Wrap)
             const targetUser = users.find(u => u.id == selectedUser);
             const targetPubKey = await importKey(targetUser.public_key, "public");
-            
             const reWrappedKey = await wrapAESKey(aesKey, targetPubKey);
 
-            // 3. Yeni şifreli anahtarı sunucuya gönder
-            // ArrayBuffer -> String dönüşümü için JSON stringify:
             const reWrappedKeyArray = Array.from(new Uint8Array(reWrappedKey));
-            
-            await api.shareFile(shareFileId, user.id, selectedUser, JSON.stringify(reWrappedKeyArray));
+            await api.shareFile(shareFileId, selectedUser, JSON.stringify(reWrappedKeyArray));
 
             alert(`Dosya ${targetUser.username} ile başarıyla paylaşıldı!`);
             setShareFileId(null);
-            loadData(); // Listeleri güncelle
+            loadData();
 
         } catch (err) {
             console.error(err);
@@ -88,52 +73,44 @@ export default function Dashboard({ user, onLogout }) {
         }
     };
 
-    // --- İNDİRME MANTIĞI ---
-    const handleDownload = async (fileId, fileName, isShared = false, sharedKeyJson = null) => {
+    const handleDownload = async (fileId, fileName, encryptedKeyJSON) => {
         try {
-            const blob = await api.downloadFile(fileId);
-            const buffer = await blob.arrayBuffer();
+            if (!encryptedKeyJSON) {
+                alert("Hata: Anahtar bulunamadı. Lütfen sayfayı yenileyin.");
+                return;
+            }
 
+            // 1. Backend'den signed URL al
+            const { url, filename } = await api.downloadFile(fileId);
+            if (!url) throw new Error("İndirme URL'i alınamadı.");
+
+            // 2. Şifreli dosyayı signed URL'den indir
+            const response = await fetch(url);
+            const encryptedFileBuffer = await response.arrayBuffer();
+
+            // 3. Private Key'i al
             const privKeyStr = localStorage.getItem(`priv_${user.username}`);
             const privateKey = await importKey(privKeyStr, "private");
 
-            let aesKey;
+            // 4. AES anahtarını çöz
+            const keyArray = JSON.parse(encryptedKeyJSON);
+            const keyBuffer = new Uint8Array(keyArray).buffer;
+            const aesKey = await unwrapAESKey(keyBuffer, privateKey);
 
-            if (isShared) {
-                // EĞER PAYLAŞILAN DOSYA İSE:
-                const sharedKeyArray = JSON.parse(sharedKeyJson);
-                const sharedKeyBuffer = new Uint8Array(sharedKeyArray).buffer;
-                
-                // Bana özel şifrelenmiş anahtarı çöz
-                aesKey = await unwrapAESKey(sharedKeyBuffer, privateKey);
+            // 5. Dosyayı çöz
+            const decryptedBuffer = await decryptFile(new Uint8Array(encryptedFileBuffer), aesKey);
 
-            } else {
-                // KENDİ DOSYAM İSE:
-                const view = new DataView(buffer);
-                const keyLength = view.getUint32(0, true);
-                const wrappedKey = buffer.slice(4, 4 + keyLength);
-                aesKey = await unwrapAESKey(wrappedKey, privateKey);
-            }
-
-            // Dosyanın içeriğini (Header'ı atlayarak) çöz
-            // Header uzunluğunu hesapla
-            const view = new DataView(buffer);
-            const originalKeyLength = view.getUint32(0, true);
-            const offset = 4 + originalKeyLength;
-            
-            const encryptedContent = buffer.slice(offset);
-
-            // Çözme işlemi
-            const decryptedBuffer = await decryptFile(new Uint8Array(encryptedContent), aesKey);
-
-            const url = window.URL.createObjectURL(new Blob([decryptedBuffer]));
+            // 6. İndir
+            const dlUrl = window.URL.createObjectURL(new Blob([decryptedBuffer]));
             const a = document.createElement('a');
-            a.href = url;
-            a.download = fileName.replace('.enc', '');
+            a.href = dlUrl;
+            a.download = (filename || fileName).replace('.enc', '');
             a.click();
-            window.URL.revokeObjectURL(url);
+            window.URL.revokeObjectURL(dlUrl);
+
         } catch (err) {
-            alert("Hata: " + err.message);
+            console.error(err);
+            alert("İndirme Hatası: " + err.message);
         }
     };
 
@@ -146,12 +123,11 @@ export default function Dashboard({ user, onLogout }) {
                     <button onClick={onLogout} className="logout-btn-text">Çıkış</button>
                 </div>
             </header>
-            
+
             <div className="main-grid">
                 <div className="left-panel">
                     <FileUpload user={user} onUploadSuccess={loadData} />
-                    
-                    {/* PAYLAŞIM MODALI */}
+
                     {shareFileId && (
                         <div className="panel-card share-card" style={{border: '2px solid #2563eb'}}>
                             <h4>Dosya Paylaş</h4>
@@ -169,7 +145,6 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
 
                 <div className="right-panel">
-                    {/* BÖLÜM 1: DOSYALARIM */}
                     <div className="panel-card files-card">
                         <h3>📂 Dosyalarım</h3>
                         <ul className="file-list-modern">
@@ -181,14 +156,13 @@ export default function Dashboard({ user, onLogout }) {
                                     </div>
                                     <div className="actions">
                                         <button className="icon-btn" onClick={() => setShareFileId(f.id)} title="Paylaş">🔗</button>
-                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, false)}>⬇️</button>
+                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, f.encrypted_key)}>⬇️</button>
                                     </div>
                                 </li>
                             ))}
                         </ul>
                     </div>
 
-                    {/* BÖLÜM 2: BANA PAYLAŞILANLAR */}
                     <div className="panel-card files-card" style={{marginTop:'20px', borderLeft:'4px solid #f59e0b'}}>
                         <h3>📨 Bana Paylaşılanlar</h3>
                         {sharedFiles.length === 0 ? <p className="empty-msg">Size gönderilen dosya yok.</p> : (
@@ -200,7 +174,7 @@ export default function Dashboard({ user, onLogout }) {
                                             <span className="fdate">Gönderen: {f.sender_name}</span>
                                             <span className="badge" style={{background:'#fffbeb', color:'#b45309'}}>🔑 Paylaşımlı</span>
                                         </div>
-                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, true, f.encrypted_key)}>
+                                        <button className="icon-btn" onClick={() => handleDownload(f.id, f.filename, f.encrypted_key)}>
                                             ⬇️ İndir
                                         </button>
                                     </li>
@@ -209,15 +183,14 @@ export default function Dashboard({ user, onLogout }) {
                         )}
                     </div>
 
-                    {/* BÖLÜM 3: LOGLAR */}
                     <div className="panel-card logs-card" style={{marginTop:'20px'}}>
                         <h3>📟 Audit Logs</h3>
                         <div className="terminal-window">
                             {logs.map((log) => (
                                 <div key={log.id} className="log-line">
-                                    <span className="log-time">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
+                                    <span className="log-time">[{new Date(log.created_at).toLocaleTimeString()}]</span>
                                     <span className={`log-action ${log.action}`}>{log.action}</span>
-                                    <span className="log-detail"> | {log.username || 'System'}: {log.details}</span>
+                                    <span className="log-detail"> | {log.users?.username || 'System'}: {log.details}</span>
                                 </div>
                             ))}
                         </div>

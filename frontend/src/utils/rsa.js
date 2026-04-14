@@ -13,7 +13,7 @@ export async function generateRSAKeyPair() {
   return keyPair;
 }
 
-// 2. Anahtarı Dışarı Aktar (BU FONKSİYON EKSİK OLABİLİR)
+// 2. Anahtarı Dışarı Aktar 
 export async function exportKey(key) {
   const exported = await window.crypto.subtle.exportKey(
     "jwk",

@@ -1,137 +1,228 @@
-const File = require('../models/File');
-const FileShare = require('../models/FileShare');
-const User = require('../models/User');
-const AuditLog = require('../models/AuditLog');
-const { Op } = require('sequelize');
-const path = require('path');
+const supabase = require('../config/supabase');
 
 // POST /api/files/upload  (protected)
 exports.uploadFile = async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Hiçbir dosya yüklenmedi.' });
-        }
+        const { encryptedKey } = req.body;
+        const file = req.file;
 
-        const newFile = await File.create({
-            user_id: req.user.id,
-            filename: req.file.originalname,
-            path: req.file.path
+        if (!file) return res.status(400).json({ error: 'Dosya yüklenmedi.' });
+        if (!encryptedKey) return res.status(400).json({ error: 'Şifreleme anahtarı eksik.' });
+
+        const storagePath = `${req.user.id}/${Date.now()}_${file.originalname}`;
+
+        const { error: uploadError } = await supabase.storage
+            .from('encrypted-files')
+            .upload(storagePath, file.buffer, { contentType: 'application/octet-stream' });
+
+        if (uploadError) throw uploadError;
+
+        const { data: newFile, error: dbError } = await supabase
+            .from('files')
+            .insert({ user_id: req.user.id, filename: file.originalname, storage_path: storagePath })
+            .select('id')
+            .single();
+
+        if (dbError) throw dbError;
+
+        // Store the owner's encrypted key so they can decrypt their own file later
+        const { error: shareError } = await supabase.from('file_shares').insert({
+            file_id: newFile.id,
+            from_user_id: req.user.id,
+            to_user_id: req.user.id,
+            encrypted_key: encryptedKey
         });
 
-        await AuditLog.create({
+        if (shareError) throw shareError;
+
+        await supabase.from('activity_logs').insert({
             user_id: req.user.id,
-            action: 'FILE_UPLOAD',
-            details: `${req.user.username}, '${req.file.originalname}' dosyasını yükledi.`
+            action: 'UPLOAD',
+            details: `${req.user.username} dosya yükledi: ${file.originalname}`,
+            ip_address: req.ip
         });
 
-        res.status(201).json({ message: 'Yüklendi.', fileId: newFile.id });
+        res.status(201).json({ message: 'Dosya yüklendi.', fileId: newFile.id });
     } catch (error) {
-        res.status(500).json({ error: 'Dosya kaydı sırasında hata oluştu.', details: error.message });
+        console.error('Upload hatası:', error);
+        res.status(500).json({ error: 'Yükleme hatası.', details: error.message });
     }
 };
 
-// GET /api/files/list  (protected — userId comes from token, not URL)
+// GET /api/files/list  (protected — userId from JWT)
 exports.getMyFiles = async (req, res) => {
     try {
-        const files = await File.findAll({
-            where: { user_id: req.user.id },
-            attributes: ['id', 'filename', 'upload_date'],
-            order: [['upload_date', 'DESC']]
-        });
+        const { data, error } = await supabase
+            .from('files')
+            .select('id, filename, upload_date, file_shares(encrypted_key)')
+            .eq('user_id', req.user.id)
+            .eq('file_shares.to_user_id', req.user.id);
+
+        if (error) throw error;
+
+        const files = data.map(f => ({
+            id: f.id,
+            filename: f.filename,
+            upload_date: f.upload_date,
+            encrypted_key: f.file_shares?.[0]?.encrypted_key ?? null
+        }));
+
         res.json(files);
     } catch (error) {
         res.status(500).json({ error: 'Dosyalar getirilemedi.' });
     }
 };
 
-// GET /api/files/download/:fileId  (protected + ownership check via ownershipMiddleware)
+// GET /api/files/download/:fileId  (protected + IDOR check via file_shares)
 exports.downloadFile = async (req, res) => {
     try {
-        // ownershipMiddleware already verified ownership and attached req.file_record
-        const file = req.file_record;
+        const { fileId } = req.params;
 
-        await AuditLog.create({
+        const { data: file, error } = await supabase
+            .from('files')
+            .select('id, filename, storage_path, user_id')
+            .eq('id', fileId)
+            .single();
+
+        if (error || !file) return res.status(404).json({ error: 'Dosya bulunamadı.' });
+
+        // IDOR check: user must own the file OR have a share record
+        const { data: share } = await supabase
+            .from('file_shares')
+            .select('id')
+            .eq('file_id', fileId)
+            .eq('to_user_id', req.user.id)
+            .single();
+
+        if (!share) return res.status(403).json({ error: 'Bu dosyaya erişim yetkiniz yok.' });
+
+        const { data: signedUrl, error: urlError } = await supabase.storage
+            .from('encrypted-files')
+            .createSignedUrl(file.storage_path, 60); // 60-second expiry
+
+        if (urlError) throw urlError;
+
+        await supabase.from('activity_logs').insert({
             user_id: req.user.id,
-            action: 'FILE_DOWNLOAD',
-            details: `${req.user.username} '${file.filename}' dosyasını indirdi.`
+            action: 'DOWNLOAD',
+            details: `${req.user.username} dosya indirdi: ${file.filename}`,
+            ip_address: req.ip
         });
 
-        res.download(file.path, file.filename);
+        res.json({ url: signedUrl.signedUrl, filename: file.filename });
     } catch (error) {
-        res.status(500).json({ error: 'İndirme sırasında hata oluştu.' });
+        res.status(500).json({ error: 'İndirme hatası.', details: error.message });
     }
 };
 
-// POST /api/files/share  (protected)
-// Body: { fileId, toUserId, encryptedKey }
-// fromUserId is taken from the JWT — never trust the client for this
+// POST /api/files/share  (protected — fromUserId always from JWT)
 exports.shareFile = async (req, res) => {
     try {
         const { fileId, toUserId, encryptedKey } = req.body;
-        const fromUserId = req.user.id; // IDOR: must come from token
+        const fromUserId = req.user.id; // never trust fromUserId from body
 
-        // Verify the sharer actually owns the file
-        const file = await File.findOne({ where: { id: fileId, user_id: fromUserId } });
-        if (!file) {
-            return res.status(403).json({ error: 'Bu dosyayı paylaşma yetkiniz yok.' });
-        }
+        // Verify the sharer owns the file
+        const { data: file } = await supabase
+            .from('files')
+            .select('id')
+            .eq('id', fileId)
+            .eq('user_id', fromUserId)
+            .single();
 
-        // Prevent duplicate share
-        const existing = await FileShare.findOne({ where: { file_id: fileId, to_user_id: toUserId } });
-        if (existing) {
-            return res.status(400).json({ error: 'Bu dosya zaten bu kişiyle paylaşılmış.' });
-        }
+        if (!file) return res.status(403).json({ error: 'Bu dosyayı paylaşma yetkiniz yok.' });
 
-        await FileShare.create({ file_id: fileId, from_user_id: fromUserId, to_user_id: toUserId, encrypted_key: encryptedKey });
+        const { data: existing } = await supabase
+            .from('file_shares')
+            .select('id')
+            .eq('file_id', fileId)
+            .eq('to_user_id', toUserId)
+            .single();
 
-        await AuditLog.create({
-            user_id: fromUserId,
-            action: 'FILE_SHARE',
-            details: `${req.user.username} dosyayı paylaştı (FileID: #${fileId} -> UserID: ${toUserId})`
+        if (existing) return res.status(400).json({ error: 'Bu dosya zaten paylaşılmış.' });
+
+        const { error } = await supabase.from('file_shares').insert({
+            file_id: fileId,
+            from_user_id: fromUserId,
+            to_user_id: toUserId,
+            encrypted_key: encryptedKey
         });
 
-        res.json({ message: 'Dosya güvenle paylaşıldı.' });
+        if (error) throw error;
+
+        await supabase.from('activity_logs').insert({
+            user_id: fromUserId,
+            action: 'SHARE',
+            details: `Dosya paylaşıldı (fileId: ${fileId} → userId: ${toUserId})`,
+            ip_address: req.ip
+        });
+
+        res.json({ message: 'Dosya paylaşıldı.' });
     } catch (error) {
-        res.status(500).json({ error: 'Paylaşım sırasında hata oluştu.', details: error.message });
+        res.status(500).json({ error: 'Paylaşım hatası.', details: error.message });
     }
 };
 
-// GET /api/files/shared  (protected — shows files shared WITH the current user)
+// GET /api/files/shared  (protected — files shared WITH current user)
 exports.getSharedFiles = async (req, res) => {
     try {
-        const shares = await FileShare.findAll({
-            where: { to_user_id: req.user.id },
-            include: [
-                { model: File,                        attributes: ['id', 'filename', 'upload_date'] },
-                { model: User, as: 'sender',          attributes: ['id', 'username'] }
-            ]
-        });
+        const { data, error } = await supabase
+            .from('file_shares')
+            .select('encrypted_key, files(id, filename, upload_date), from_user:users!from_user_id(username)')
+            .eq('to_user_id', req.user.id)
+            .neq('from_user_id', req.user.id); // exclude own uploads
 
-        const result = shares.map(s => ({
-            id:           s.File.id,
-            filename:     s.File.filename,
-            upload_date:  s.File.upload_date,
-            sender_name:  s.sender.username,
-            from_user_id: s.from_user_id,
-            to_user_id:   s.to_user_id,
+        if (error) throw error;
+
+        const files = data.map(s => ({
+            id:            s.files?.id,
+            filename:      s.files?.filename,
+            upload_date:   s.files?.upload_date,
+            sender_name:   s.from_user?.username,
             encrypted_key: s.encrypted_key
         }));
 
-        res.json(result);
+        res.json(files);
     } catch (error) {
-        res.status(500).json({ error: 'Paylaşılan dosyalar getirilemedi.', details: error.message });
+        res.status(500).json({ error: 'Paylaşılan dosyalar getirilemedi.' });
     }
 };
 
-// GET /api/users/list  (protected — returns all users except the current one)
-exports.getUsersList = async (req, res) => {
+// GET /api/files/users  (protected — all users except current)
+exports.getUsers = async (req, res) => {
     try {
-        const users = await User.findAll({
-            where: { id: { [Op.ne]: req.user.id } },
-            attributes: ['id', 'username', 'public_key']
-        });
-        res.json(users);
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, username, public_key')
+            .neq('id', req.user.id);
+
+        if (error) throw error;
+        res.json(data);
     } catch (error) {
-        res.status(500).json({ error: 'Kullanıcı listesi getirilemedi.' });
+        res.status(500).json({ error: 'Kullanıcılar getirilemedi.' });
+    }
+};
+
+// GET /api/files/logs  (protected)
+exports.getLogs = async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('activity_logs')
+            .select('*, users(username)')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        const logs = data.map(log => ({
+            id:        log.id,
+            user_id:   log.user_id,
+            username:  log.users?.username ?? 'Unknown',
+            action:    log.action,
+            details:   log.details,
+            timestamp: log.created_at
+        }));
+
+        res.json(logs);
+    } catch (error) {
+        res.status(500).json({ error: 'Loglar getirilemedi.' });
     }
 };

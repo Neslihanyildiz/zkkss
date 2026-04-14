@@ -1,9 +1,12 @@
 const API_URL = 'http://localhost:3000/api';
 
+const getToken = () => localStorage.getItem('token');
+
 export const api = {
-    // Register artık Public Key de alıyor
+
+    // --- AUTH ---
     register: async (username, password, publicKey) => {
-        const res = await fetch(`${API_URL}/register`, {
+        const res = await fetch(`${API_URL}/auth/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password, publicKey })
@@ -12,57 +15,68 @@ export const api = {
     },
 
     login: async (username, password) => {
-        const res = await fetch(`${API_URL}/login`, {
+        const res = await fetch(`${API_URL}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
         });
-        if (!res.ok) throw new Error('Giriş başarısız');
         return res.json();
     },
 
+    // --- DOSYALAR ---
     uploadFile: async (formData) => {
-        const res = await fetch(`${API_URL}/upload`, {
+        const res = await fetch(`${API_URL}/files/upload`, {
             method: 'POST',
-            body: formData 
+            headers: { Authorization: `Bearer ${getToken()}` },
+            body: formData
         });
         return res.json();
     },
 
-    getFiles: async (userId) => {
-        const res = await fetch(`${API_URL}/files/${userId}`);
+    getMyFiles: async () => {
+        const res = await fetch(`${API_URL}/files/list`, {
+            headers: { Authorization: `Bearer ${getToken()}` }
+        });
         return res.json();
     },
 
     downloadFile: async (fileId) => {
-        const res = await fetch(`${API_URL}/download/${fileId}`);
-        if (!res.ok) throw new Error('İndirme hatası');
-        return res.blob();
+        const res = await fetch(`${API_URL}/files/download/${fileId}`, {
+            headers: { Authorization: `Bearer ${getToken()}` }
+        });
+        return res.json(); // artık { url, filename } dönüyor
     },
 
-    getLogs: async () => {
-        const res = await fetch(`${API_URL}/logs`);
-        return res.json();
-    },
-
-    // --- YENİ EKLENEN PAYLAŞIM FONKSİYONLARI ---
-    
-    getUsersList: async (myId) => {
-        const res = await fetch(`${API_URL}/users-list/${myId}`);
-        return res.json();
-    },
-
-    shareFile: async (fileId, fromUserId, toUserId, encryptedKey) => {
-        const res = await fetch(`${API_URL}/share`, {
+    shareFile: async (fileId, toUserId, encryptedKey) => {
+        const res = await fetch(`${API_URL}/files/share`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fileId, fromUserId, toUserId, encryptedKey })
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${getToken()}`
+            },
+            body: JSON.stringify({ fileId, toUserId, encryptedKey })
         });
         return res.json();
     },
 
-    getSharedFiles: async (userId) => {
-        const res = await fetch(`${API_URL}/shared-files/${userId}`);
+    getSharedFiles: async () => {
+        const res = await fetch(`${API_URL}/files/shared`, {
+            headers: { Authorization: `Bearer ${getToken()}` }
+        });
+        return res.json();
+    },
+
+    getUsers: async () => {
+        const res = await fetch(`${API_URL}/files/users`, {
+            headers: { Authorization: `Bearer ${getToken()}` }
+        });
+        return res.json();
+    },
+
+    getLogs: async () => {
+        const res = await fetch(`${API_URL}/files/logs`, {
+            headers: { Authorization: `Bearer ${getToken()}` }
+        });
         return res.json();
     }
 };
