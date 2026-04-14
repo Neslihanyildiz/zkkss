@@ -47,7 +47,7 @@ export default function FileUpload({ user, onUploadSuccess }) {
             
             // A. Şifreli Dosya (Saf Veri)
             const blob = new Blob([encryptedFileContent]);
-            formData.append('encryptedFile', blob, file.name + ".enc");
+            formData.append('file', blob, file.name + ".enc");
             
             // B. Kullanıcı ID
             formData.append('userId', user.id);

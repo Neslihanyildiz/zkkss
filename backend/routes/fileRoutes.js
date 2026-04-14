@@ -4,11 +4,12 @@ const fileController = require('../controllers/fileController');
 const authMiddleware = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
 
-// Dosya Yükle (Sadece giriş yapmış kullanıcılar)
-// 'file' kelimesi frontend formundaki input name="file" ile aynı olmalı
 router.post('/upload', authMiddleware, upload.single('file'), fileController.uploadFile);
-
-// Dosyalarımı Listele
 router.get('/list', authMiddleware, fileController.getMyFiles);
+router.get('/download/:fileId', authMiddleware, fileController.downloadFile);
+router.post('/share', authMiddleware, fileController.shareFile);
+router.get('/shared', authMiddleware, fileController.getSharedFiles);
+router.get('/users', authMiddleware, fileController.getUsers);
+router.get('/logs', authMiddleware, fileController.getLogs);
 
 module.exports = router;

@@ -1,31 +1,36 @@
-const User = require('../models/User');
-const AuditLog = require('../models/AuditLog'); // Log modelini çağırdık
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const supabase = require('../config/supabase');
 
-// --- KULLANICI KAYIT (REGISTER) ---
+// --- KAYIT ---
 exports.register = async (req, res) => {
     try {
         const { username, password, publicKey } = req.body;
 
-        const existingUser = await User.findOne({ where: { username } });
-        if (existingUser) {
+        const { data: existing } = await supabase
+            .from('users')
+            .select('id')
+            .eq('username', username)
+            .single();
+
+        if (existing) {
             return res.status(400).json({ error: 'Bu kullanıcı adı zaten alınmış.' });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const password_hash = await bcrypt.hash(password, 10);
 
-        const newUser = await User.create({
-            username,
-            password_hash: hashedPassword,
-            public_key: publicKey
-        });
+        const { data: newUser, error } = await supabase
+            .from('users')
+            .insert({ username, password_hash, public_key: publicKey })
+            .select('id, username')
+            .single();
 
-        // LOGLAMA: Kayıt olma işlemi
-        await AuditLog.create({
+        if (error) throw error;
+
+        await supabase.from('activity_logs').insert({
             user_id: newUser.id,
             action: 'REGISTER',
-            details: `${username} kullanıcısı sisteme kayıt oldu.`,
+            details: `${username} sisteme kayıt oldu.`,
             ip_address: req.ip
         });
 
@@ -36,17 +41,23 @@ exports.register = async (req, res) => {
     }
 };
 
-// --- GİRİŞ YAPMA (LOGIN) ---
+// --- GİRİŞ ---
 exports.login = async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        const user = await User.findOne({ where: { username } });
-        if (!user) {
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id, username, password_hash, public_key')
+            .eq('username', username)
+            .single();
+
+        if (error || !user) {
             return res.status(401).json({ error: 'Kullanıcı bulunamadı.' });
         }
 
         const isMatch = await bcrypt.compare(password, user.password_hash);
+
         if (!isMatch) {
             return res.status(401).json({ error: 'Hatalı şifre.' });
         }
@@ -57,8 +68,7 @@ exports.login = async (req, res) => {
             { expiresIn: '1h' }
         );
 
-        // LOGLAMA: Giriş işlemi
-        await AuditLog.create({
+        await supabase.from('activity_logs').insert({
             user_id: user.id,
             action: 'LOGIN',
             details: `${username} sisteme giriş yaptı.`,
@@ -68,7 +78,7 @@ exports.login = async (req, res) => {
         res.json({
             message: 'Giriş başarılı.',
             token,
-            publicKey: user.public_key
+            user: { id: user.id, username: user.username, public_key: user.public_key }
         });
 
     } catch (error) {
