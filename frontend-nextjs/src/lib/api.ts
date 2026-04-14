@@ -44,39 +44,16 @@ interface ShareResponse {
   error?: string;
 }
 
-export interface User {
-  id: number;
-  username: string;
-  public_key: string;
-}
-
-export interface FileData {
-  id: number;
+/** Signed URL returned by the download endpoint */
+interface DownloadResponse {
+  url: string;
   filename: string;
-  upload_date: string;
-  size?: number;
-  owner_id?: number;
+  error?: string;
 }
 
-export interface SharedFile {
-  id: number;
-  filename: string;
-  sender_name: string;
-  encrypted_key: string;
-  upload_date: string;
-  from_user_id: number;
-  to_user_id: number;
-}
-
-export interface AuditLog {
-  id: number;
-  user_id: number;
-  username: string;
-  action: string;
-  details: string;
-  timestamp: string;
-  createdAt?: string;
-}
+// Single source of truth — types live in types.ts, re-exported here for convenience
+import type { User, FileData, SharedFile, AuditLog } from "@/lib/types";
+export type { User, FileData, SharedFile, AuditLog };
 
 // ── API calls ──────────────────────────────────────────────────────────────
 
@@ -104,12 +81,12 @@ export const api = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || "Login failed");
+      throw new Error((body as { error?: string }).error || "Login failed");
     }
     return res.json();
   },
 
-  // POST /api/files/upload  (multipart, protected)
+  // POST /api/files/upload  (multipart — 'file' field + 'encryptedKey' field)
   uploadFile: async (formData: FormData): Promise<UploadResponse> => {
     const res = await fetch(`${API_URL}/files/upload`, {
       method: "POST",
@@ -119,43 +96,46 @@ export const api = {
     return res.json();
   },
 
-  // GET /api/files/list  (protected — server uses token for userId)
+  // GET /api/files/list  → FileData[] (each item includes encrypted_key)
   getFiles: async (): Promise<FileData[]> => {
     const res = await fetch(`${API_URL}/files/list`, {
-      headers: { "Content-Type": "application/json", ...authHeader() },
+      headers: { ...authHeader() },
     });
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   },
 
-  // GET /api/files/download/:fileId  (protected + ownership check on server)
-  downloadFile: async (fileId: number): Promise<Blob> => {
+  // GET /api/files/download/:fileId  → signed URL (60-second expiry)
+  getDownloadUrl: async (fileId: number): Promise<DownloadResponse> => {
     const res = await fetch(`${API_URL}/files/download/${fileId}`, {
       headers: authHeader(),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || "Download failed");
+      throw new Error((body as { error?: string }).error || "Download failed");
     }
-    return res.blob();
+    return res.json();
   },
 
-  // GET /api/logs  (protected)
+  // GET /api/files/logs
   getLogs: async (): Promise<AuditLog[]> => {
-    const res = await fetch(`${API_URL}/logs`, {
-      headers: { "Content-Type": "application/json", ...authHeader() },
+    const res = await fetch(`${API_URL}/files/logs`, {
+      headers: { ...authHeader() },
     });
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   },
 
-  // GET /api/users/list  (protected — server excludes current user via token)
+  // GET /api/files/users  (all users except current)
   getUsersList: async (): Promise<User[]> => {
-    const res = await fetch(`${API_URL}/users/list`, {
-      headers: { "Content-Type": "application/json", ...authHeader() },
+    const res = await fetch(`${API_URL}/files/users`, {
+      headers: { ...authHeader() },
     });
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   },
 
-  // POST /api/files/share  (protected — fromUserId is taken from JWT on server)
+  // POST /api/files/share  (fromUserId comes from JWT on server)
   shareFile: async (
     fileId: number,
     toUserId: number,
@@ -169,11 +149,12 @@ export const api = {
     return res.json();
   },
 
-  // GET /api/files/shared  (protected — server uses token for userId)
+  // GET /api/files/shared  → SharedFile[] (files shared WITH current user)
   getSharedFiles: async (): Promise<SharedFile[]> => {
     const res = await fetch(`${API_URL}/files/shared`, {
-      headers: { "Content-Type": "application/json", ...authHeader() },
+      headers: { ...authHeader() },
     });
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   },
 };

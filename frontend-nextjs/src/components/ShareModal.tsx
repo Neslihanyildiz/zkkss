@@ -4,7 +4,7 @@
 import { useState, useEffect } from "react";
 import { X, Users, Send } from "lucide-react";
 import { api } from "@/lib/api";
-import { User, FileData } from "@/lib/types";
+import type { User, FileData } from "@/lib/types";
 import { importKey, unwrapAESKey, wrapAESKey } from "@/lib/rsa";
 import { getPrivateKey } from "@/lib/keyStorage";
 
@@ -22,59 +22,38 @@ export default function ShareModal({ file, user, onClose, onShare }: ShareModalP
   const [status, setStatus] = useState("");
 
   useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        // Server excludes current user via JWT — no myId param needed
-        const userList = await api.getUsersList();
-        setUsers(userList);
-      } catch (error) {
-        console.error("Error loading users:", error);
-      }
-    };
-    loadUsers();
+    api.getUsersList().then(setUsers).catch(console.error);
   }, []);
 
   const handleShare = async () => {
-    if (!user || !selectedUserId) {
-      setStatus("Please select a user");
-      return;
-    }
+    if (!user || !selectedUserId) { setStatus("Please select a user"); return; }
 
     setIsLoading(true);
     setStatus("Preparing share…");
 
     try {
-      // 1. Download the encrypted file (ownership check happens on server)
-      const blob = await api.downloadFile(file.id);
-      const buffer = await blob.arrayBuffer();
-
-      // 2. Get private key from IndexedDB (non-extractable CryptoKey)
+      // 1. Get private key from IndexedDB (non-extractable)
       const privateKey = await getPrivateKey(user.username);
       if (!privateKey) throw new Error("Private key not found in IndexedDB. Please re-register.");
 
-      // 3. Extract the wrapped AES key from the file package
-      //    Format: [4-byte key length][wrapped key][encrypted content]
-      const view = new DataView(buffer);
-      const keyLength = view.getUint32(0, true);
-      const wrappedKey = buffer.slice(4, 4 + keyLength);
+      // 2. Unwrap the owner's AES key using their private key
+      //    file.encrypted_key is the owner's wrapped key stored in file_shares
+      if (!file.encrypted_key) throw new Error("This file has no encryption key on record.");
+      const ownerKeyArray = JSON.parse(file.encrypted_key) as number[];
+      const ownerKeyBuffer = new Uint8Array(ownerKeyArray).buffer;
+      const aesKey = await unwrapAESKey(ownerKeyBuffer, privateKey);
 
-      // 4. Unwrap AES key using our private key
-      const aesKey = await unwrapAESKey(wrappedKey, privateKey);
-
-      // 5. Get recipient's public key and import it
+      // 3. Import recipient's RSA public key and re-wrap the AES key for them
       const recipientUser = users.find((u) => u.id === selectedUserId);
       if (!recipientUser) throw new Error("Recipient not found");
       if (!recipientUser.public_key) throw new Error("Recipient has no public key on file");
 
       const recipientPubKey = await importKey(recipientUser.public_key, "public");
-
-      // 6. Re-wrap the AES key with the recipient's public key
       const reWrappedKey = await wrapAESKey(aesKey, recipientPubKey);
-      const reWrappedKeyArray = Array.from(new Uint8Array(reWrappedKey));
+      const reWrappedKeyJSON = JSON.stringify(Array.from(new Uint8Array(reWrappedKey)));
 
-      // 7. Send share record to server
-      //    fromUserId is no longer sent — the server reads it from the JWT
-      await api.shareFile(file.id, selectedUserId, JSON.stringify(reWrappedKeyArray));
+      // 4. Send share record — fromUserId comes from JWT on the server
+      await api.shareFile(file.id, selectedUserId, reWrappedKeyJSON);
 
       setStatus(`✅ File shared with ${recipientUser.username}!`);
       setTimeout(() => { onShare(); onClose(); }, 1500);
@@ -103,15 +82,11 @@ export default function ShareModal({ file, user, onClose, onShare }: ShareModalP
 
         {/* Content */}
         <div className="p-6 space-y-6">
-          {/* File Info */}
           <div className="p-4 bg-navy-50 rounded-lg border border-navy-100">
             <p className="text-sm text-navy-600 mb-1">File</p>
-            <p className="font-semibold text-navy-900 truncate">
-              {file.original_name || file.filename}
-            </p>
+            <p className="font-semibold text-navy-900 truncate">{file.original_name || file.filename}</p>
           </div>
 
-          {/* User Selection */}
           <div>
             <label className="block text-sm font-semibold text-navy-900 mb-3">Share with:</label>
             {users.length === 0 ? (
@@ -141,7 +116,6 @@ export default function ShareModal({ file, user, onClose, onShare }: ShareModalP
             )}
           </div>
 
-          {/* Status */}
           {status && (
             <div className={`p-4 rounded-lg text-sm ${
               status.includes("✅") ? "bg-green-50 text-green-700 border border-green-200"

@@ -3,7 +3,8 @@
 
 import { useState, useEffect } from "react";
 import { Share2 } from "lucide-react";
-import { api, SharedFile } from "@/lib/api";
+import { api } from "@/lib/api";
+import type { SharedFile } from "@/lib/types";
 import { User } from "@/lib/types";
 import { unwrapAESKey } from "@/lib/rsa";
 import { decryptFile } from "@/lib/aes";
@@ -19,9 +20,8 @@ export default function SharedPage() {
       try {
         const userData = localStorage.getItem("user");
         if (userData) {
-          const parsedUser = JSON.parse(userData);
+          const parsedUser = JSON.parse(userData) as User;
           setUser(parsedUser);
-          // userId now comes from JWT on the server — no param needed
           const files = await api.getSharedFiles();
           setSharedFiles(files);
         }
@@ -31,46 +31,39 @@ export default function SharedPage() {
         setLoading(false);
       }
     };
-
     loadSharedFiles();
   }, []);
 
-  const handleDownload = async (
-    fileId: number,
-    fileName: string,
-    encryptedKey: string,
-  ) => {
+  const handleDownload = async (file: SharedFile) => {
     if (!user) return;
 
     try {
-      // Download encrypted blob
-      const blob = await api.downloadFile(fileId);
-      const buffer = await blob.arrayBuffer();
+      // 1. Get a 60-second signed URL from the backend (IDOR check happens here)
+      const { url } = await api.getDownloadUrl(file.id);
 
-      // Get private key from IndexedDB (non-extractable CryptoKey)
+      // 2. Fetch raw encrypted content from Supabase Storage
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to fetch file from storage");
+      const encryptedContent = new Uint8Array(await response.arrayBuffer());
+
+      // 3. Get private key from IndexedDB (non-extractable)
       const privateKey = await getPrivateKey(user.username);
       if (!privateKey) throw new Error("Private key not found in IndexedDB. Please re-register.");
 
-      // Parse the recipient-encrypted AES key (stored as JSON array of bytes)
-      const keyArray = JSON.parse(encryptedKey) as number[];
+      // 4. Unwrap the recipient-specific AES key
+      const keyArray = JSON.parse(file.encrypted_key) as number[];
       const keyBuffer = new Uint8Array(keyArray).buffer;
-
-      // Unwrap the AES key using our private key
       const aesKey = await unwrapAESKey(keyBuffer, privateKey);
 
-      // Parse the file format: [4-byte key length][wrapped key][encrypted content]
-      const view = new DataView(buffer);
-      const keyLength = view.getUint32(0, true);
-      const encryptedContent = buffer.slice(4 + keyLength);
-
-      // Decrypt and trigger download
-      const decryptedBuffer = await decryptFile(new Uint8Array(encryptedContent), aesKey);
-      const url = window.URL.createObjectURL(new Blob([decryptedBuffer]));
+      // 5. Decrypt and trigger browser download
+      const decryptedBuffer = await decryptFile(encryptedContent, aesKey);
+      const blob = new Blob([decryptedBuffer]);
+      const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName.replace(".enc", "");
+      a.href = objectUrl;
+      a.download = file.filename.replace(".enc", "");
       a.click();
-      window.URL.revokeObjectURL(url);
+      window.URL.revokeObjectURL(objectUrl);
     } catch (error) {
       alert(`Error downloading: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -88,13 +81,11 @@ export default function SharedPage() {
 
   return (
     <div className="space-y-8">
-      {/* Header */}
       <div>
         <h1 className="text-3xl font-bold text-navy-900 mb-2">Shared Files</h1>
         <p className="text-navy-600">Files shared with you by other users</p>
       </div>
 
-      {/* Shared Files List */}
       <div className="space-y-3">
         {sharedFiles.length === 0 ? (
           <div className="text-center py-16 card">
@@ -123,9 +114,8 @@ export default function SharedPage() {
                     </div>
                   </div>
                 </div>
-
                 <button
-                  onClick={() => handleDownload(file.id, file.filename, file.encrypted_key)}
+                  onClick={() => handleDownload(file)}
                   className="px-4 py-2 bg-blue-900 text-white rounded-lg font-semibold hover:bg-blue-800 transition-colors flex-shrink-0"
                 >
                   Download

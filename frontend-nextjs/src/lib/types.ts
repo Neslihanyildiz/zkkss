@@ -6,30 +6,27 @@ export interface User {
   public_key?: string;
 }
 
-export interface AuthState {
-  user: User | null;
-  token: string | null;
-  setUser: (user: User | null) => void;
-  setToken: (token: string | null) => void;
-  logout: () => void;
-}
-
 export interface FileData {
   id: number;
   filename: string;
+  upload_date: string;
+  /** Recipient-specific wrapped AES key stored in file_shares (null if missing) */
+  encrypted_key: string | null;
   original_name?: string;
   mimetype?: string;
   size?: number;
-  owner_id: number;
-  upload_date: string;
+  owner_id?: number;
   createdAt?: string;
 }
 
-export interface SharedFile extends FileData {
+export interface SharedFile {
+  id: number;
+  filename: string;
   sender_name: string;
   encrypted_key: string;
-  from_user_id: number;
-  to_user_id: number;
+  upload_date: string;
+  from_user_id?: number;
+  to_user_id?: number;
 }
 
 export interface AuditLog {
@@ -39,18 +36,4 @@ export interface AuditLog {
   action: string;
   details: string;
   timestamp: string;
-  createdAt?: string;
-}
-
-export interface UploadProgress {
-  loaded: number;
-  total: number;
-  percent: number;
-}
-
-export interface ShareData {
-  fileId: number;
-  fromUserId: number;
-  toUserId: number;
-  encryptedKey: string;
 }

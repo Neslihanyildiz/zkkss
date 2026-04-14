@@ -3,11 +3,14 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Upload, Download, Share2 } from "lucide-react";
-import { api } from "@/lib/api";
-import { User, FileData } from "@/lib/types";
+import { api, FileData } from "@/lib/api";
+import { User } from "@/lib/types";
 import FileCard from "@/components/fileCard";
 import UploadZone from "@/components/UploadZone";
 import ShareModal from "@/components/ShareModal";
+import { getPrivateKey } from "@/lib/keyStorage";
+import { unwrapAESKey } from "@/lib/rsa";
+import { decryptFile } from "@/lib/aes";
 
 export default function DashboardPage() {
   const [user, setUser] = useState<User | null>(null);
@@ -21,14 +24,10 @@ export default function DashboardPage() {
     try {
       const userData = localStorage.getItem("user");
       if (userData) {
-        const parsedUser = JSON.parse(userData);
+        const parsedUser = JSON.parse(userData) as User;
         setUser(parsedUser);
         const filesList = await api.getFiles();
-        const filesWithOwnerId = filesList.map((file) => ({
-          ...file,
-          owner_id: parsedUser.id,
-        }));
-        setFiles(filesWithOwnerId);
+        setFiles(filesList);
       }
     } catch (error) {
       console.error("Error loading data:", error);
@@ -37,9 +36,7 @@ export default function DashboardPage() {
     }
   }, []);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filteredFiles = files.filter((f) =>
     f.filename.toLowerCase().includes(searchQuery.toLowerCase()),
@@ -50,18 +47,43 @@ export default function DashboardPage() {
     setShowShareModal(true);
   };
 
-  const handleDownload = async (fileId: number, fileName: string) => {
+  const handleDownload = async (fileId: number, fileName: string, encryptedKey: string | null) => {
+    if (!user) return;
+
+    if (!encryptedKey) {
+      alert("Cannot decrypt: no key found for this file. Try re-uploading.");
+      return;
+    }
+
     try {
-      const blob = await api.downloadFile(fileId);
-      const url = window.URL.createObjectURL(blob);
+      // 1. Get signed URL from backend (IDOR check happens here)
+      const { url } = await api.getDownloadUrl(fileId);
+
+      // 2. Fetch the raw encrypted content from Supabase Storage
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to fetch file from storage");
+      const encryptedContent = new Uint8Array(await response.arrayBuffer());
+
+      // 3. Get private key from IndexedDB (non-extractable)
+      const privateKey = await getPrivateKey(user.username);
+      if (!privateKey) throw new Error("Private key not found. Please re-register.");
+
+      // 4. Parse the wrapped AES key and unwrap it
+      const keyArray = JSON.parse(encryptedKey) as number[];
+      const keyBuffer = new Uint8Array(keyArray).buffer;
+      const aesKey = await unwrapAESKey(keyBuffer, privateKey);
+
+      // 5. Decrypt and trigger download
+      const decryptedBuffer = await decryptFile(encryptedContent, aesKey);
+      const blob = new Blob([decryptedBuffer]);
+      const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = objectUrl;
       a.download = fileName.replace(".enc", "");
       a.click();
-      window.URL.revokeObjectURL(url);
+      window.URL.revokeObjectURL(objectUrl);
     } catch (error) {
-      console.error("Download error:", error);
-      alert("Error downloading file");
+      alert(`Download error: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -82,12 +104,8 @@ export default function DashboardPage() {
         <div className="card p-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-navy-600 text-sm font-medium">
-                Files Encrypted
-              </p>
-              <p className="text-3xl font-bold text-navy-900 mt-2">
-                {files.length}
-              </p>
+              <p className="text-navy-600 text-sm font-medium">Files Encrypted</p>
+              <p className="text-3xl font-bold text-navy-900 mt-2">{files.length}</p>
             </div>
             <div className="p-4 rounded-lg bg-navy-100">
               <Upload className="w-8 h-8 text-navy-900" />
@@ -98,15 +116,8 @@ export default function DashboardPage() {
         <div className="card p-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-navy-600 text-sm font-medium">Total Size</p>
-              <p className="text-3xl font-bold text-navy-900 mt-2">
-                {(
-                  files.reduce((acc, f) => acc + (f.size || 0), 0) /
-                  1024 /
-                  1024
-                ).toFixed(2)}{" "}
-                MB
-              </p>
+              <p className="text-navy-600 text-sm font-medium">Shared With You</p>
+              <p className="text-3xl font-bold text-navy-900 mt-2">—</p>
             </div>
             <div className="p-4 rounded-lg bg-navy-100">
               <Download className="w-8 h-8 text-navy-900" />
@@ -117,9 +128,7 @@ export default function DashboardPage() {
         <div className="card p-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-navy-600 text-sm font-medium">
-                Encryption Type
-              </p>
+              <p className="text-navy-600 text-sm font-medium">Encryption</p>
               <p className="text-3xl font-bold text-navy-900 mt-2">AES-256</p>
             </div>
             <div className="p-4 rounded-lg bg-navy-100">
@@ -139,7 +148,7 @@ export default function DashboardPage() {
           placeholder="Search files..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="input-field"
+          className="input"
         />
       </div>
 
@@ -148,9 +157,7 @@ export default function DashboardPage() {
         <h2 className="text-xl font-bold text-navy-900">Your Files</h2>
         {filteredFiles.length === 0 ? (
           <div className="text-center py-12 card">
-            <p className="text-navy-600">
-              No files yet. Upload one to get started!
-            </p>
+            <p className="text-navy-600">No files yet. Upload one to get started!</p>
           </div>
         ) : (
           filteredFiles.map((file, index) => (
@@ -158,7 +165,7 @@ export default function DashboardPage() {
               key={file.id}
               file={file}
               onShare={handleShare}
-              onDownload={handleDownload}
+              onDownload={(id, name) => handleDownload(id, name, file.encrypted_key)}
               index={index}
             />
           ))
@@ -171,10 +178,7 @@ export default function DashboardPage() {
           file={selectedFile}
           user={user}
           onClose={() => setShowShareModal(false)}
-          onShare={() => {
-            loadData();
-            setShowShareModal(false);
-          }}
+          onShare={() => { loadData(); setShowShareModal(false); }}
         />
       )}
     </div>

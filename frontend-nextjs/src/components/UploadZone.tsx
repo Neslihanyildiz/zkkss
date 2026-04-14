@@ -37,10 +37,8 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
       // 1. Get user's public key
       const storedUser = JSON.parse(localStorage.getItem("user") || "{}");
       let pubKeyStr: string | null =
-        storedUser?.public_key ||
-        localStorage.getItem(`pub_${user.username}`);
+        storedUser?.public_key || localStorage.getItem(`pub_${user.username}`);
 
-      // Fallback: derive public key from stored private key JWK
       if (!pubKeyStr || pubKeyStr === "undefined" || pubKeyStr === "null") {
         const privKeyStr = localStorage.getItem(`priv_${user.username}`);
         if (!privKeyStr || privKeyStr === "undefined") {
@@ -50,56 +48,33 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
         localStorage.setItem(`pub_${user.username}`, pubKeyStr);
       }
 
-      let publicKey: CryptoKey;
-      try {
-        publicKey = await importKey(pubKeyStr, "public");
-      } catch {
-        throw new Error("Step 1 failed: importKey — " + pubKeyStr?.slice(0, 40));
-      }
+      const publicKey = await importKey(pubKeyStr, "public");
+      setUploadProgress(10);
 
       // 2. Read file
       const fileBuffer = await file.arrayBuffer();
 
-      // 3. Generate AES key
-      let aesKey: CryptoKey;
-      try {
-        aesKey = await generateAESKey();
-      } catch (e) {
-        throw new Error("Step 3 failed: generateAESKey — " + e);
-      }
+      // 3. Generate one-time AES key
+      const aesKey = await generateAESKey();
 
-      // 4. Encrypt file
-      let encryptedContent: Uint8Array;
-      try {
-        encryptedContent = await encryptFile(fileBuffer, aesKey);
-      } catch (e) {
-        throw new Error("Step 4 failed: encryptFile — " + e);
-      }
+      // 4. Encrypt file content (raw bytes only — key stored separately)
+      const encryptedContent = await encryptFile(fileBuffer, aesKey);
       setUploadProgress(50);
 
-      // 5. Wrap AES key with RSA public key
-      let wrappedKey: ArrayBuffer;
-      try {
-        wrappedKey = await wrapAESKey(aesKey, publicKey);
-      } catch (e) {
-        throw new Error("Step 5 failed: wrapAESKey — " + e);
-      }
+      // 5. Wrap AES key with owner's RSA public key
+      const wrappedKey = await wrapAESKey(aesKey, publicKey);
 
-      // 6. Package: [Key Length (4 bytes)] + [Wrapped Key] + [Encrypted Content]
-      const keyLength = wrappedKey.byteLength;
-      const finalBuffer = new Uint8Array(4 + keyLength + encryptedContent.byteLength);
-      const view = new DataView(finalBuffer.buffer);
-      view.setUint32(0, keyLength, true);
-      finalBuffer.set(new Uint8Array(wrappedKey), 4);
-      finalBuffer.set(encryptedContent, 4 + keyLength);
-
+      // 6. Convert wrapped key to JSON-serialisable format
+      const wrappedKeyJSON = JSON.stringify(Array.from(new Uint8Array(wrappedKey)));
       setUploadProgress(75);
 
-      // 7. Send to backend — token is added by api.uploadFile via authHeader()
-      const blob = new Blob([finalBuffer]);
+      // 7. Build multipart form:
+      //    - 'file'         → raw encrypted content (Supabase stores this)
+      //    - 'encryptedKey' → wrapped AES key (stored in file_shares table)
+      const blob = new Blob([encryptedContent.buffer as ArrayBuffer]);
       const formData = new FormData();
-      formData.append("encryptedFile", blob, file.name + ".enc");
-      // userId no longer needed in body — the server reads it from the JWT
+      formData.append("file", blob, file.name + ".enc");
+      formData.append("encryptedKey", wrappedKeyJSON);
 
       await api.uploadFile(formData);
 
@@ -115,7 +90,7 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
     } catch (error: unknown) {
       setStatus({
         type: "error",
-        message: `❌ Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+        message: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`,
       });
     } finally {
       setIsUploading(false);
@@ -129,9 +104,8 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      setSelectedFile(files[0]);
+    if (e.dataTransfer.files.length > 0) {
+      setSelectedFile(e.dataTransfer.files[0]);
       setStatus({ type: "idle", message: "" });
     }
   };
@@ -154,20 +128,12 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
         onDrop={handleDrop}
         onClick={() => !isUploading && fileInputRef.current?.click()}
         className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all ${
-          isDragging
-            ? "border-navy-900 bg-navy-50"
-            : selectedFile
-            ? "border-navy-500 bg-navy-50"
-            : "border-navy-200 hover:border-navy-400 hover:bg-navy-50"
+          isDragging         ? "border-navy-900 bg-navy-50"
+          : selectedFile    ? "border-navy-500 bg-navy-50"
+          : "border-navy-200 hover:border-navy-400 hover:bg-navy-50"
         }`}
       >
-        <input
-          ref={fileInputRef}
-          type="file"
-          onChange={handleFileSelect}
-          className="hidden"
-          disabled={isUploading}
-        />
+        <input ref={fileInputRef} type="file" onChange={handleFileSelect} className="hidden" disabled={isUploading} />
         <Upload className="w-12 h-12 text-navy-400 mx-auto mb-4" />
         {selectedFile ? (
           <>
@@ -212,20 +178,14 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
         </div>
       )}
 
-      {/* Status Message */}
+      {/* Status */}
       {status.type !== "idle" && (
-        <div
-          className={`mt-6 p-4 rounded-lg flex items-center gap-3 ${
-            status.type === "success"
-              ? "bg-green-50 border border-green-200"
-              : "bg-red-50 border border-red-200"
-          }`}
-        >
-          {status.type === "success" ? (
-            <Check className="w-5 h-5 text-green-600 flex-shrink-0" />
-          ) : (
-            <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-          )}
+        <div className={`mt-6 p-4 rounded-lg flex items-center gap-3 ${
+          status.type === "success" ? "bg-green-50 border border-green-200" : "bg-red-50 border border-red-200"
+        }`}>
+          {status.type === "success"
+            ? <Check className="w-5 h-5 text-green-600 flex-shrink-0" />
+            : <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />}
           <p className={status.type === "success" ? "text-green-700" : "text-red-700"}>
             {status.message}
           </p>
