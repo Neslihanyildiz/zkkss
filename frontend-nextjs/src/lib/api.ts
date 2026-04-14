@@ -29,6 +29,7 @@ interface LoginResponse {
     id: number;
     username: string;
     public_key: string;
+    role: import("@/lib/types").UserRole;
   };
   error?: string;
 }

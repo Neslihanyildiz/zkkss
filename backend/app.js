@@ -12,5 +12,6 @@ app.get('/', (req, res) => res.json({ message: 'SecureShare API running' }));
 
 app.use('/api/auth',  require('./routes/authRoutes'));
 app.use('/api/files', require('./routes/fileRoutes'));
+app.use('/api/admin', require('./routes/adminRoutes'));
 
 module.exports = app;
