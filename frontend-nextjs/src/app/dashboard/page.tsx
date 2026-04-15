@@ -26,8 +26,9 @@ export default function DashboardPage() {
       if (userData) {
         const parsedUser = JSON.parse(userData) as User;
         setUser(parsedUser);
-        const filesList = await api.getFiles();
-        setFiles(filesList);
+        const rawFiles = await api.getFiles();
+
+        setFiles(rawFiles);
       }
     } catch (error) {
       console.error("Error loading data:", error);
@@ -79,7 +80,7 @@ export default function DashboardPage() {
       const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      a.download = fileName.replace(".enc", "");
+      a.download = fileName;
       a.click();
       window.URL.revokeObjectURL(objectUrl);
     } catch (error) {

@@ -6,9 +6,9 @@ const { validatePassword } = require('../utils/passwordValidator');
 // POST /api/auth/register
 exports.register = async (req, res) => {
     try {
-        const { username, password, publicKey } = req.body;
+        const { username, password, publicKey, encryptedPrivateKey, keySalt } = req.body;
 
-        // ── Password strength check ──────────────────────────────────────
+        // Password strength check
         const errors = validatePassword(password);
         if (errors.length > 0) {
             return res.status(400).json({
@@ -17,7 +17,7 @@ exports.register = async (req, res) => {
             });
         }
 
-        // ── Duplicate username check ─────────────────────────────────────
+        // Duplicate username check
         const { data: existing } = await supabase
             .from('users')
             .select('id')
@@ -28,11 +28,17 @@ exports.register = async (req, res) => {
             return res.status(400).json({ error: 'Bu kullanıcı adı zaten alınmış.' });
         }
 
-        const password_hash = await bcrypt.hash(password, 12); // cost 12 for stronger hashing
+        const password_hash = await bcrypt.hash(password, 12);
 
         const { data: newUser, error } = await supabase
             .from('users')
-            .insert({ username, password_hash, public_key: publicKey, role: 'user' })
+            .insert({
+                username,
+                password_hash,
+                public_key:             publicKey,
+                encrypted_private_key:  encryptedPrivateKey ?? null,
+                key_salt:               keySalt ?? null,
+            })
             .select('id, username')
             .single();
 
@@ -56,9 +62,10 @@ exports.login = async (req, res) => {
     try {
         const { username, password } = req.body;
 
+        // Select * so we get 'role' if the column exists, without erroring if it doesn't
         const { data: user, error } = await supabase
             .from('users')
-            .select('id, username, password_hash, public_key, role')
+            .select('*')
             .eq('username', username)
             .single();
 
@@ -71,7 +78,7 @@ exports.login = async (req, res) => {
             return res.status(401).json({ error: 'Hatalı şifre.' });
         }
 
-        // Role defaults to 'user' if the column doesn't exist yet in Supabase
+        // Default to 'user' if role column doesn't exist yet
         const role = user.role ?? 'user';
 
         const token = jwt.sign(
@@ -89,8 +96,12 @@ exports.login = async (req, res) => {
 
         // NEVER include password_hash in the response
         res.json({
-            message: 'Giriş başarılı.',
+            message:               'Giriş başarılı.',
             token,
+            // Return the PBKDF2-wrapped private key so the browser can unlock it
+            // on any device using the user's password (never stored in plaintext)
+            encrypted_private_key: user.encrypted_private_key ?? null,
+            key_salt:              user.key_salt ?? null,
             user: {
                 id:         user.id,
                 username:   user.username,

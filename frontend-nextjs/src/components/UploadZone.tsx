@@ -69,12 +69,14 @@ export default function UploadZone({ onUploadSuccess, user }: UploadZoneProps) {
       setUploadProgress(75);
 
       // 7. Build multipart form:
-      //    - 'file'         → raw encrypted content (Supabase stores this)
-      //    - 'encryptedKey' → wrapped AES key (stored in file_shares table)
+      //    - 'file'           → raw encrypted content (Supabase stores this)
+      //    - 'encryptedKey'   → wrapped AES key (stored in file_shares table)
+      //    - 'originalFilename' → plain original filename
       const blob = new Blob([encryptedContent.buffer as ArrayBuffer]);
       const formData = new FormData();
-      formData.append("file", blob, file.name + ".enc");
+      formData.append("file", blob, "encrypted.enc");
       formData.append("encryptedKey", wrappedKeyJSON);
+      formData.append("originalFilename", file.name);
 
       await api.uploadFile(formData);
 

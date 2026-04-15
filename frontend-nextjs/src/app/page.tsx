@@ -6,6 +6,14 @@ import { Shield, Lock, User, Eye, EyeOff, Check, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { generateRSAKeyPair, exportKey } from "@/lib/rsa";
 import { storePrivateKey } from "@/lib/keyStorage";
+import {
+  generateSalt,
+  saltToBase64,
+  base64ToSalt,
+  deriveWrappingKey,
+  wrapPrivateKey,
+  unwrapPrivateKey,
+} from "@/lib/keyWrapping";
 import { checkPasswordStrength, isPasswordValid, PASSWORD_RULES } from "@/lib/passwordStrength";
 
 type Mode = "login" | "register";
@@ -37,10 +45,17 @@ export default function AuthPage() {
         const publicKeyStr  = await exportKey(keyPair.publicKey);
         const privateKeyStr = await exportKey(keyPair.privateKey);
 
-        const res = await api.register(username, password, publicKeyStr);
+        // Wrap the private key with a PBKDF2 key derived from the password
+        // so it can be recovered on any device at login time
+        const salt           = generateSalt();
+        const wrappingKey    = await deriveWrappingKey(password, salt);
+        const encPrivKey     = await wrapPrivateKey(keyPair.privateKey, wrappingKey);
+        const keySalt        = saltToBase64(salt);
+
+        const res = await api.register(username, password, publicKeyStr, encPrivKey, keySalt);
         if (res.error) throw new Error(res.error);
 
-        // Store private key in IndexedDB with extractable: false
+        // Also cache the private key in IndexedDB for immediate use on this device
         await storePrivateKey(username, privateKeyStr);
         localStorage.setItem(`pub_${username}`, publicKeyStr);
 
@@ -49,6 +64,15 @@ export default function AuthPage() {
         setPassword("");
       } else {
         const res = await api.login(username, password);
+
+        // Unwrap the private key from the server using the user's password
+        // This makes the key available on any device, not just where they registered
+        if (res.encrypted_private_key && res.key_salt) {
+          const salt        = base64ToSalt(res.key_salt);
+          const wrappingKey = await deriveWrappingKey(password, salt);
+          const privateKey  = await unwrapPrivateKey(res.encrypted_private_key, wrappingKey);
+          await storePrivateKey(res.user.username, privateKey);
+        }
 
         localStorage.setItem("token", res.token);
         const userToStore = {
@@ -205,9 +229,20 @@ export default function AuthPage() {
               className="w-full py-3 bg-navy-900 text-white rounded-xl font-semibold text-sm hover:bg-navy-700 transition-colors shadow-navy-sm disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {loading
-                ? mode === "register" ? "Generating keys…" : "Signing in…"
+                ? mode === "register" ? "Generating keys…" : "Unlocking keys…"
                 : mode === "register" ? "Create Account" : "Sign In"}
             </button>
+
+            {/* Forgot password */}
+            {mode === "login" && (
+              <button
+                type="button"
+                onClick={() => setError("Forgot your password? Contact your system administrator to reset it.")}
+                className="w-full text-center text-xs text-navy-400 hover:text-navy-600 transition-colors mt-1"
+              >
+                Forgot password?
+              </button>
+            )}
           </form>
         </div>
 

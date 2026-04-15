@@ -18,6 +18,6 @@ router.get('/users',            fileController.getUsers);
 
 // ── Admin / System Manager routes ────────────────────────────────────────
 // Only admin and system_manager can see all activity logs
-router.get('/logs', role('admin', 'system_manager'), fileController.getLogs);
+router.get('/logs', role('admin', 'system_manager', 'system_administrator'), fileController.getLogs);
 
 module.exports = router;

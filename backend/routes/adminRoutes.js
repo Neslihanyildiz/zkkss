@@ -8,12 +8,15 @@ const role = require('../middleware/roleMiddleware');
 router.use(authMiddleware);
 
 // GET  /api/admin/users           — admin or system_manager
-router.get('/users', role('admin', 'system_manager'), adminController.getAllUsers);
+router.get('/users', role('admin', 'system_manager', 'system_administrator'), adminController.getAllUsers);
 
-// PATCH /api/admin/users/:id/role — system_manager only
-router.patch('/users/:id/role', role('system_manager'), adminController.updateUserRole);
+// PATCH /api/admin/users/:id/role — system_manager / system_administrator only
+router.patch('/users/:id/role', role('system_manager', 'system_administrator'), adminController.updateUserRole);
 
-// DELETE /api/admin/users/:id     — system_manager only
-router.delete('/users/:id', role('system_manager'), adminController.deleteUser);
+// DELETE /api/admin/users/:id     — system_manager / system_administrator only
+router.delete('/users/:id', role('system_manager', 'system_administrator'), adminController.deleteUser);
+
+// PATCH /api/admin/users/:id/password — system_manager / system_administrator only
+router.patch('/users/:id/password', role('system_manager', 'system_administrator'), adminController.resetPassword);
 
 module.exports = router;

@@ -3,13 +3,13 @@ const supabase = require('../config/supabase');
 // POST /api/files/upload  (protected)
 exports.uploadFile = async (req, res) => {
     try {
-        const { encryptedKey } = req.body;
+        const { encryptedKey, originalFilename } = req.body;
         const file = req.file;
 
         if (!file) return res.status(400).json({ error: 'Dosya yüklenmedi.' });
         if (!encryptedKey) return res.status(400).json({ error: 'Şifreleme anahtarı eksik.' });
 
-        const storagePath = `${req.user.id}/${Date.now()}_${file.originalname}`;
+        const storagePath = `${req.user.id}/${Date.now()}.enc`;
 
         const { error: uploadError } = await supabase.storage
             .from('encrypted-files')
@@ -19,7 +19,7 @@ exports.uploadFile = async (req, res) => {
 
         const { data: newFile, error: dbError } = await supabase
             .from('files')
-            .insert({ user_id: req.user.id, filename: file.originalname, storage_path: storagePath })
+            .insert({ user_id: req.user.id, filename: originalFilename || file.originalname.replace(/\.enc$/, ''), storage_path: storagePath })
             .select('id')
             .single();
 
@@ -52,22 +52,35 @@ exports.uploadFile = async (req, res) => {
 // GET /api/files/list  (protected — userId from JWT)
 exports.getMyFiles = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        // 1. Get files owned by this user
+        const { data: files, error } = await supabase
             .from('files')
-            .select('id, filename, upload_date, file_shares(encrypted_key)')
-            .eq('user_id', req.user.id)
-            .eq('file_shares.to_user_id', req.user.id);
+            .select('id, filename, upload_date')
+            .eq('user_id', req.user.id);
 
         if (error) throw error;
+        if (!files.length) return res.json([]);
 
-        const files = data.map(f => ({
-            id: f.id,
-            filename: f.filename,
-            upload_date: f.upload_date,
-            encrypted_key: f.file_shares?.[0]?.encrypted_key ?? null
+        // 2. Get the owner's share record for each file (to_user_id = owner)
+        const fileIds = files.map(f => f.id);
+        const { data: shares, error: sharesError } = await supabase
+            .from('file_shares')
+            .select('file_id, encrypted_key')
+            .in('file_id', fileIds)
+            .eq('to_user_id', req.user.id);
+
+        if (sharesError) throw sharesError;
+
+        const sharesMap = Object.fromEntries((shares || []).map(s => [s.file_id, s]));
+
+        const result = files.map(f => ({
+            id:            f.id,
+            filename:      f.filename,
+            upload_date:   f.upload_date,
+            encrypted_key: sharesMap[f.id]?.encrypted_key ?? null
         }));
 
-        res.json(files);
+        res.json(result);
     } catch (error) {
         res.status(500).json({ error: 'Dosyalar getirilemedi.' });
     }
@@ -165,23 +178,46 @@ exports.shareFile = async (req, res) => {
 // GET /api/files/shared  (protected — files shared WITH current user)
 exports.getSharedFiles = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        // 1. Get share records where I am the recipient (exclude my own uploads)
+        const { data: shares, error } = await supabase
             .from('file_shares')
-            .select('encrypted_key, files(id, filename, upload_date), from_user:users!from_user_id(username)')
+            .select('file_id, encrypted_key, from_user_id')
             .eq('to_user_id', req.user.id)
-            .neq('from_user_id', req.user.id); // exclude own uploads
+            .neq('from_user_id', req.user.id);
 
         if (error) throw error;
+        if (!shares.length) return res.json([]);
 
-        const files = data.map(s => ({
-            id:            s.files?.id,
-            filename:      s.files?.filename,
-            upload_date:   s.files?.upload_date,
-            sender_name:   s.from_user?.username,
+        // 2. Fetch file metadata for those file IDs
+        const fileIds = shares.map(s => s.file_id);
+        const { data: files, error: filesError } = await supabase
+            .from('files')
+            .select('id, filename, upload_date')
+            .in('id', fileIds);
+
+        if (filesError) throw filesError;
+
+        // 3. Fetch sender usernames
+        const senderIds = [...new Set(shares.map(s => s.from_user_id))];
+        const { data: senders, error: sendersError } = await supabase
+            .from('users')
+            .select('id, username')
+            .in('id', senderIds);
+
+        if (sendersError) throw sendersError;
+
+        const filesMap  = Object.fromEntries((files   || []).map(f => [f.id,  f]));
+        const senderMap = Object.fromEntries((senders || []).map(u => [u.id, u.username]));
+
+        const result = shares.map(s => ({
+            id:            filesMap[s.file_id]?.id,
+            filename:      filesMap[s.file_id]?.filename,
+            upload_date:   filesMap[s.file_id]?.upload_date,
+            sender_name:   senderMap[s.from_user_id],
             encrypted_key: s.encrypted_key
         }));
 
-        res.json(files);
+        res.json(result);
     } catch (error) {
         res.status(500).json({ error: 'Paylaşılan dosyalar getirilemedi.' });
     }
@@ -205,23 +241,30 @@ exports.getUsers = async (req, res) => {
 // GET /api/files/logs  (protected)
 exports.getLogs = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { data: logs, error } = await supabase
             .from('activity_logs')
-            .select('*, users(username)')
+            .select('*')
             .order('created_at', { ascending: false });
 
         if (error) throw error;
 
-        const logs = data.map(log => ({
+        // Resolve usernames separately to avoid join dependency on FK constraints
+        const userIds = [...new Set(logs.map(l => l.user_id).filter(Boolean))];
+        const { data: users } = await supabase
+            .from('users')
+            .select('id, username')
+            .in('id', userIds);
+
+        const userMap = Object.fromEntries((users || []).map(u => [u.id, u.username]));
+
+        res.json(logs.map(log => ({
             id:        log.id,
             user_id:   log.user_id,
-            username:  log.users?.username ?? 'Unknown',
+            username:  userMap[log.user_id] ?? 'Unknown',
             action:    log.action,
             details:   log.details,
             timestamp: log.created_at
-        }));
-
-        res.json(logs);
+        })));
     } catch (error) {
         res.status(500).json({ error: 'Loglar getirilemedi.' });
     }

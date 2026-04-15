@@ -22,18 +22,19 @@ const NAV_ITEMS: NavItem[] = [
   { name: "Users",    href: "/dashboard/admin",    icon: Users,       label: "User Management", minRole: "admin" },
 ];
 
-const ROLE_ORDER: Record<UserRole, number> = { user: 0, admin: 1, system_manager: 2 };
+const ROLE_ORDER: Record<UserRole, number> = { user: 0, admin: 1, system_manager: 2, system_administrator: 3 };
 
 function hasAccess(userRole: UserRole, minRole?: UserRole): boolean {
   if (!minRole) return true;
-  return ROLE_ORDER[userRole] >= ROLE_ORDER[minRole];
+  return (ROLE_ORDER[userRole] ?? 0) >= (ROLE_ORDER[minRole] ?? 0);
 }
 
 function getRoleBadge(role: UserRole) {
   switch (role) {
-    case "system_manager": return { label: "Sys Manager", className: "bg-purple-600 text-white" };
-    case "admin":          return { label: "Admin",       className: "bg-blue-600 text-white"   };
-    default:               return { label: "User",        className: "bg-navy-700 text-navy-200" };
+    case "system_administrator": return { label: "Sys Admin",   className: "bg-red-600 text-white"    };
+    case "system_manager":       return { label: "Sys Manager", className: "bg-purple-600 text-white" };
+    case "admin":                return { label: "Admin",       className: "bg-blue-600 text-white"   };
+    default:                     return { label: "User",        className: "bg-navy-700 text-navy-200" };
   }
 }
 

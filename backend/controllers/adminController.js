@@ -1,6 +1,7 @@
+const bcrypt = require('bcryptjs');
 const supabase = require('../config/supabase');
 
-const VALID_ROLES = ['user', 'admin', 'system_manager'];
+const VALID_ROLES = ['user', 'admin', 'system_manager', 'system_administrator'];
 
 // GET /api/admin/users  (admin+)
 // Returns all users with their roles (no password hashes)
@@ -79,8 +80,8 @@ exports.deleteUser = async (req, res) => {
 
         if (!target) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
 
-        // system_manager cannot delete another system_manager
-        if (target.role === 'system_manager') {
+        // system_manager/system_administrator cannot delete another system_manager/system_administrator
+        if (target.role === 'system_manager' || target.role === 'system_administrator') {
             return res.status(403).json({ error: 'Başka bir sistem yöneticisi silinemez.' });
         }
 
@@ -97,5 +98,52 @@ exports.deleteUser = async (req, res) => {
         res.json({ message: `'${target.username}' hesabı silindi.` });
     } catch (error) {
         res.status(500).json({ error: 'Kullanıcı silinemedi.', details: error.message });
+    }
+};
+
+// PATCH /api/admin/users/:id/password  (system_manager / system_administrator only)
+// Body: { newPassword: string }
+exports.resetPassword = async (req, res) => {
+    try {
+        const targetId = parseInt(req.params.id, 10);
+        const { newPassword } = req.body;
+
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+        }
+
+        if (targetId === req.user.id) {
+            return res.status(400).json({ error: 'Use the normal settings to change your own password.' });
+        }
+
+        const { data: target } = await supabase
+            .from('users')
+            .select('username, role')
+            .eq('id', targetId)
+            .single();
+
+        if (!target) return res.status(404).json({ error: 'User not found.' });
+
+        const password_hash = await bcrypt.hash(newPassword, 12);
+
+        // Clear encrypted_private_key and key_salt — they were derived from the old password
+        // and are now invalid. The user will need to re-register their keys on next login.
+        const { error } = await supabase
+            .from('users')
+            .update({ password_hash, encrypted_private_key: null, key_salt: null })
+            .eq('id', targetId);
+
+        if (error) throw error;
+
+        await supabase.from('activity_logs').insert({
+            user_id: req.user.id,
+            action: 'PASSWORD_RESET',
+            details: `${req.user.username} reset password for user '${target.username}' (#${targetId}).`,
+            ip_address: req.ip
+        });
+
+        res.json({ message: `Password reset for '${target.username}'.` });
+    } catch (error) {
+        res.status(500).json({ error: 'Password reset failed.', details: error.message });
     }
 };
