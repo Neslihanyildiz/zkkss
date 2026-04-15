@@ -25,6 +25,10 @@ interface RegisterResponse {
 interface LoginResponse {
   message: string;
   token: string;
+  /** PBKDF2-wrapped RSA private key (base64) — null for accounts created before this feature */
+  encrypted_private_key?: string | null;
+  /** PBKDF2 salt used when wrapping (base64) */
+  key_salt?: string | null;
   user: {
     id: number;
     username: string;
@@ -64,11 +68,13 @@ export const api = {
     username: string,
     password: string,
     publicKey: string,
+    encryptedPrivateKey: string,
+    keySalt: string,
   ): Promise<RegisterResponse> => {
     const res = await fetch(`${API_URL}/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password, publicKey }),
+      body: JSON.stringify({ username, password, publicKey, encryptedPrivateKey, keySalt }),
     });
     return res.json();
   },
@@ -87,13 +93,17 @@ export const api = {
     return res.json();
   },
 
-  // POST /api/files/upload  (multipart — 'file' field + 'encryptedKey' field)
+  // POST /api/files/upload  (multipart — 'file' + 'encryptedKey' + 'encryptedFilename' fields)
   uploadFile: async (formData: FormData): Promise<UploadResponse> => {
     const res = await fetch(`${API_URL}/files/upload`, {
       method: "POST",
       headers: authHeader(),
       body: formData,
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { error?: string }).error || "Upload failed");
+    }
     return res.json();
   },
 
@@ -147,6 +157,10 @@ export const api = {
       headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({ fileId, toUserId, encryptedKey }),
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { error?: string }).error || "Share failed");
+    }
     return res.json();
   },
 

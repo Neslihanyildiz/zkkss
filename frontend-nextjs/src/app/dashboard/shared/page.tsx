@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 import type { SharedFile } from "@/lib/types";
 import { User } from "@/lib/types";
 import { unwrapAESKey } from "@/lib/rsa";
-import { decryptFile } from "@/lib/aes";
+import { decryptFile, decryptString } from "@/lib/aes";
 import { getPrivateKey } from "@/lib/keyStorage";
 
 export default function SharedPage() {
@@ -22,8 +22,28 @@ export default function SharedPage() {
         if (userData) {
           const parsedUser = JSON.parse(userData) as User;
           setUser(parsedUser);
-          const files = await api.getSharedFiles();
-          setSharedFiles(files);
+          const rawFiles = await api.getSharedFiles();
+
+          // Decrypt filenames using each file's recipient-specific AES key
+          const privateKey = await getPrivateKey(parsedUser.username);
+          if (privateKey && rawFiles.length > 0) {
+            const decrypted = await Promise.all(
+              rawFiles.map(async (f) => {
+                if (!f.encrypted_key) return f;
+                try {
+                  const keyArray = JSON.parse(f.encrypted_key) as number[];
+                  const aesKey = await unwrapAESKey(new Uint8Array(keyArray).buffer, privateKey);
+                  const filename = await decryptString(f.filename, aesKey);
+                  return { ...f, filename };
+                } catch {
+                  return f; // file uploaded before encryption — keep raw name
+                }
+              })
+            );
+            setSharedFiles(decrypted);
+          } else {
+            setSharedFiles(rawFiles);
+          }
         }
       } catch (error) {
         console.error("Error loading shared files:", error);
@@ -61,7 +81,7 @@ export default function SharedPage() {
       const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      a.download = file.filename.replace(".enc", "");
+      a.download = file.filename;
       a.click();
       window.URL.revokeObjectURL(objectUrl);
     } catch (error) {

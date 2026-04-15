@@ -31,18 +31,21 @@ export async function storePrivateKey(username: string, jwkStrOrKey: string | Cr
   let nonExtractableKey: CryptoKey;
 
   if (typeof jwkStrOrKey === "string") {
+    // JWK string from registration — import as non-extractable
     const jwk = JSON.parse(jwkStrOrKey);
     delete jwk.key_ops; // strip key_ops to avoid browser conflicts
     nonExtractableKey = await window.crypto.subtle.importKey(
       "jwk",
       jwk,
       { name: "RSA-OAEP", hash: "SHA-256" },
-      false,            // <-- extractable: false
+      false,
       ["unwrapKey"],
     );
+  } else if (!jwkStrOrKey.extractable) {
+    // Already non-extractable (e.g. returned by unwrapPrivateKey) — store directly
+    nonExtractableKey = jwkStrOrKey;
   } else {
-    // Already a CryptoKey — export to JWK then re-import non-extractable
-    // (this path assumes the source key was generated with extractable: true)
+    // Extractable CryptoKey (e.g. from generateRSAKeyPair) — re-import as non-extractable
     const jwk = await window.crypto.subtle.exportKey("jwk", jwkStrOrKey);
     (jwk as Record<string, unknown>).key_ops = undefined;
     nonExtractableKey = await window.crypto.subtle.importKey(
