@@ -19,6 +19,7 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showShareModal, setShowShareModal] = useState(false);
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
+  const [noKey, setNoKey] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -27,8 +28,10 @@ export default function DashboardPage() {
         const parsedUser = JSON.parse(userData) as User;
         setUser(parsedUser);
         const rawFiles = await api.getFiles();
-
         setFiles(rawFiles);
+
+        const privateKey = await getPrivateKey(parsedUser.username);
+        setNoKey(!privateKey);
       }
     } catch (error) {
       console.error("Error loading data:", error);
@@ -100,6 +103,17 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
+      {/* No-key warning */}
+      {noKey && (
+        <div className="p-4 rounded-xl bg-yellow-50 border border-yellow-300 text-yellow-800 text-sm flex items-start gap-3">
+          <span className="text-xl">⚠️</span>
+          <div>
+            <p className="font-semibold">Encryption key not found</p>
+            <p className="mt-0.5">Your private key is missing from this browser. You can view files but cannot upload, download, or share until you <strong>log out and log back in</strong>. If the problem persists, contact your system administrator to reset your account.</p>
+          </div>
+        </div>
+      )}
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="card p-6">

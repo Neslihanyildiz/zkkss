@@ -81,7 +81,11 @@ export async function wrapPrivateKey(
     wrappingKey,
     "AES-KW",
   );
-  return btoa(String.fromCharCode(...new Uint8Array(wrapped)));
+  // Use a loop instead of spread — spread can silently truncate for large arrays
+  const bytes = new Uint8Array(wrapped);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
 }
 
 /**
@@ -93,7 +97,9 @@ export async function unwrapPrivateKey(
   wrappedBase64: string,
   wrappingKey: CryptoKey,
 ): Promise<CryptoKey> {
-  const bytes = Uint8Array.from(atob(wrappedBase64), (c) => c.charCodeAt(0));
+  // Strip any whitespace/newlines that storage may have added
+  const clean = wrappedBase64.replace(/\s/g, "");
+  const bytes = Uint8Array.from(atob(clean), (c) => c.charCodeAt(0));
   return crypto.subtle.unwrapKey(
     "pkcs8",
     bytes.buffer,

@@ -65,13 +65,32 @@ export default function AuthPage() {
       } else {
         const res = await api.login(username, password);
 
-        // Unwrap the private key from the server using the user's password
-        // This makes the key available on any device, not just where they registered
+        // Restore the private key into IndexedDB so crypto ops work on any device.
+        // This is done in a separate try/catch — a key restoration failure must NOT
+        // prevent login. The user can still view the app; they just won't be able
+        // to decrypt or share files until their keys are available.
+        let keyRestored = false;
         if (res.encrypted_private_key && res.key_salt) {
-          const salt        = base64ToSalt(res.key_salt);
-          const wrappingKey = await deriveWrappingKey(password, salt);
-          const privateKey  = await unwrapPrivateKey(res.encrypted_private_key, wrappingKey);
-          await storePrivateKey(res.user.username, privateKey);
+          try {
+            const salt        = base64ToSalt(res.key_salt);
+            const wrappingKey = await deriveWrappingKey(password, salt);
+            const privateKey  = await unwrapPrivateKey(res.encrypted_private_key, wrappingKey);
+            await storePrivateKey(res.user.username, privateKey);
+            keyRestored = true;
+          } catch (keyErr) {
+            console.warn("Key unwrapping failed:", keyErr);
+          }
+        }
+
+        // Fallback: check localStorage for old JWK-format key (Vite frontend compat)
+        if (!keyRestored) {
+          const oldKey = localStorage.getItem(`priv_${res.user.username}`);
+          if (oldKey) {
+            try {
+              await storePrivateKey(res.user.username, oldKey);
+              keyRestored = true;
+            } catch { /* ignore */ }
+          }
         }
 
         localStorage.setItem("token", res.token);
