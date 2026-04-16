@@ -30,7 +30,10 @@ exports.register = async (req, res) => {
 
         const password_hash = await bcrypt.hash(password, 12);
 
-        const { data: newUser, error } = await supabase
+        // Try inserting with key-wrapping fields first.
+        // If the columns don't exist yet in Supabase, fall back to basic insert.
+        let newUser, insertError;
+        ({ data: newUser, error: insertError } = await supabase
             .from('users')
             .insert({
                 username,
@@ -40,9 +43,19 @@ exports.register = async (req, res) => {
                 key_salt:               keySalt ?? null,
             })
             .select('id, username')
-            .single();
+            .single());
 
-        if (error) throw error;
+        if (insertError) {
+            if (insertError.message.includes('encrypted_private_key') || insertError.message.includes('key_salt')) {
+                // Columns not added to Supabase yet — insert without them
+                ({ data: newUser, error: insertError } = await supabase
+                    .from('users')
+                    .insert({ username, password_hash, public_key: publicKey })
+                    .select('id, username')
+                    .single());
+            }
+            if (insertError) throw insertError;
+        }
 
         await supabase.from('activity_logs').insert({
             user_id: newUser.id,
