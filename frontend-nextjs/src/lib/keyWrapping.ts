@@ -23,19 +23,32 @@ export function generateSalt(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32));
 }
 
+/** Encode a Uint8Array to base64 using a loop (safe for large arrays). */
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/** Decode a base64 string to Uint8Array, stripping any whitespace first. */
+function fromBase64(b64: string): Uint8Array {
+  return Uint8Array.from(atob(b64.replace(/\s/g, "")), (c) => c.charCodeAt(0));
+}
+
 /** Encode salt (or any ArrayBuffer) to base64 for server storage. */
 export function saltToBase64(salt: Uint8Array): string {
-  return btoa(String.fromCharCode(...salt));
+  return toBase64(salt);
 }
 
 /** Decode a base64 salt back to Uint8Array. */
 export function base64ToSalt(b64: string): Uint8Array {
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return fromBase64(b64);
 }
 
 /**
- * Derive an AES-256-KW wrapping key from a plaintext password + salt.
- * The same password + salt always produces the same wrapping key.
+ * Derive an AES-256-GCM encryption key from a plaintext password + salt.
+ * Uses AES-GCM (not AES-KW) — no 8-byte alignment requirement, works on
+ * all browsers with any key size.
  */
 export async function deriveWrappingKey(
   password: string,
@@ -48,8 +61,6 @@ export async function deriveWrappingKey(
     false,
     ["deriveKey"],
   );
-  // Cast required: TypeScript's Web Crypto types distinguish ArrayBuffer from
-  // ArrayBufferLike, but at runtime both are valid BufferSource values.
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
@@ -58,55 +69,58 @@ export async function deriveWrappingKey(
       hash: "SHA-256",
     },
     raw,
-    { name: "AES-KW", length: 256 },
+    { name: "AES-GCM", length: 256 },
     false,
-    ["wrapKey", "unwrapKey"],
+    ["encrypt", "decrypt"],
   );
 }
 
 /**
- * Wrap an RSA private key with the AES-KW wrapping key.
- * Uses PKCS#8 export format — standard binary encoding for private keys.
- * Returns a base64 string safe for server storage.
- *
- * Requires: privateKey.extractable === true (set during key generation).
+ * Wrap an RSA private key by exporting it as JWK and encrypting with AES-GCM.
+ * Stores IV (12 bytes) + ciphertext as a single base64 string.
+ * AES-GCM has no alignment requirement so it works with any key size.
  */
 export async function wrapPrivateKey(
   privateKey: CryptoKey,
   wrappingKey: CryptoKey,
 ): Promise<string> {
-  const wrapped = await crypto.subtle.wrapKey(
-    "pkcs8",
-    privateKey,
+  const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+  const encoded = new TextEncoder().encode(JSON.stringify(jwk));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
     wrappingKey,
-    "AES-KW",
+    encoded,
   );
-  // Use a loop instead of spread — spread can silently truncate for large arrays
-  const bytes = new Uint8Array(wrapped);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+  const combined = new Uint8Array(12 + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), 12);
+  return toBase64(combined);
 }
 
 /**
- * Unwrap the server-stored private key using the AES-KW wrapping key.
- * Returns a non-extractable RSA-OAEP CryptoKey with ["unwrapKey"] usage.
- * Ready to be stored in IndexedDB and used for AES key unwrapping.
+ * Unwrap a server-stored private key: decrypt with AES-GCM, parse JWK,
+ * re-import as non-extractable CryptoKey ready for use in IndexedDB.
  */
 export async function unwrapPrivateKey(
   wrappedBase64: string,
   wrappingKey: CryptoKey,
 ): Promise<CryptoKey> {
-  // Strip any whitespace/newlines that storage may have added
-  const clean = wrappedBase64.replace(/\s/g, "");
-  const bytes = Uint8Array.from(atob(clean), (c) => c.charCodeAt(0));
-  return crypto.subtle.unwrapKey(
-    "pkcs8",
-    bytes.buffer,
+  const combined = fromBase64(wrappedBase64);
+  const iv         = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const decrypted  = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
     wrappingKey,
-    "AES-KW",
+    ciphertext,
+  );
+  const jwk = JSON.parse(new TextDecoder().decode(decrypted)) as JsonWebKey;
+  delete (jwk as Record<string, unknown>).key_ops;
+  return crypto.subtle.importKey(
+    "jwk",
+    jwk,
     { name: "RSA-OAEP", hash: "SHA-256" },
-    false,           // non-extractable — cannot be exported from IndexedDB
+    false,
     ["unwrapKey"],
   );
 }
